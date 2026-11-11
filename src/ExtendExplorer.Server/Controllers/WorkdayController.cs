@@ -459,7 +459,7 @@ public sealed class WorkdayController : ControllerBase
 
         try
         {
-            // The WCP App API accepts a native bulk create: POST { "data": [...] }
+            // The Extend API accepts a native bulk create: POST { "data": [...] }
             // to the entity URL with ?bulk=true, up to 100 records per call. We
             // sub-batch by 100 (the client already chunks; this is a safety net).
             const int bulkSize = 100;
@@ -760,7 +760,7 @@ public sealed class WorkdayController : ControllerBase
 
     // ─────────────────────────────────────────────────────────────────────
     // POST /api/workday/delete   Body: { boName, ids[] }
-    // Deletes via the WCP App API's native bulk delete: DELETE {entity}?bulk=true
+    // Deletes via the Extend API's native bulk delete: DELETE {entity}?bulk=true
     // with { "data": [ { "id": wid }, … ] }, up to 100 ids per call. Each id
     // still gets its own result row so the dialog can report per-record outcomes.
     // ─────────────────────────────────────────────────────────────────────

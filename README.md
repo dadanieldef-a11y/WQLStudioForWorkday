@@ -3,7 +3,7 @@
 A C# build of the "Toad for Workday Extend" WQL workbench (originally a Next.js /
 React / TypeScript app). Browse Workday Extend business objects, write and run
 WQL as the logged-in user, drill into references, and Insert / Update / Delete
-custom-BO records via the WCP Extend App REST API.
+custom-BO records via the Extend API.
 
 ## Architecture
 
@@ -60,7 +60,7 @@ active, and click **Connect** to start the OAuth flow.
   to the clicked instance, keeping the select list.
 - Insert auto-drops read-only / derived fields (Workday error code `A13`) and
   retries, so cloning a row into a new record "just works".
-- Bulk writes use the WCP App API's native bulk endpoints (`?bulk=true`,
+- Bulk writes use the Extend API's native bulk endpoints (`?bulk=true`,
   100 records per call, body `{ "data": [ … ] }`): Bulk insert / Import
   (POST), Bulk edit (PATCH) and Delete (DELETE with `{ "id": wid }` entries).
   Results are still reported per record.
@@ -74,10 +74,6 @@ Things to know :
   Every user runs on their own machine's localhost:3000, so the one
   registered loopback URI works for all of them. If port 3000 is already in use
   on a machine, the app won't start on the expected URL and login will fail.
-- **SmartScreen.** The exe is unsigned, so Windows Defender SmartScreen will warn
-  "unrecognized app" on first run - it runs if they click *More info → Run
-  anyway*. A code-signing certificate (ideally one you already own) removes
-  this.
 - **Offline networks.** Monaco loads from a CDN; on a locked-down network the
   editor falls back to a plain textarea. Self-host Monaco (see the Monaco note
   above) if that matters.
@@ -96,6 +92,6 @@ src/
     Components/   Explorer (orchestrator), SchemaTree, QueryEditor, ResultsGrid,
                   Toolbar, ModeActionBar, Pager, and the write/export dialogs
     Services/     ApiClient, WqlMetadata, WqlQuery, WqlEdit, WqlFormat,
-                  BoFields, Connections, PaneLayout, Interop, Wcp
+                  BoFields, Connections, PaneLayout, Interop
     wwwroot/
 ```

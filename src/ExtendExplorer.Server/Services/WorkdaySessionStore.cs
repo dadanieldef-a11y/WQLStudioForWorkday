@@ -13,8 +13,8 @@ public sealed class WorkdaySessionData
     public string? User { get; set; }        // worker id (JWT `sub`)
     public string? WqlBase { get; set; }     // tenant WQL base, pinned at login
     public string? TenantName { get; set; }  // connection name, for display
-    public string? BoCompanyId { get; set; } // custom-BO marker for the WCP App REST API
-    public string? ApiBase { get; set; }     // WCP Extend App API base, for custom-BO writes
+    public string? BoCompanyId { get; set; } // custom-BO marker for the Extend API
+    public string? ApiBase { get; set; }     // Extend API base, for custom-BO writes
     public long? CreatedAt { get; set; }
 }
 

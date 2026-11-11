@@ -140,7 +140,7 @@
             if (status < 200 || status >= 300)
             {
                 _error = status == (int)HttpStatusCode.Unauthorized
-                    ? "Not authorized (401). The session token may not be scoped for the WCP App API, or it has expired — sign out and reconnect if it persists."
+                    ? "Not authorized (401). The session token may not be scoped for the Extend API, or it has expired — sign out and reconnect if it persists."
                     : ErrorFrom(body) is { } msg ? $"Delete failed: {msg}" : $"Delete failed ({status})";
                 _phase = "confirm";
                 return;

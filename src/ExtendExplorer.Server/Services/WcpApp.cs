@@ -2,7 +2,7 @@ using System.Text.RegularExpressions;
 
 namespace ExtendExplorer.Server.Services;
 
-// Port of lib/wcp-app.ts. WCP Extend App REST helpers.
+// Port of lib/wcp-app.ts. Extend API helpers.
 //
 // Custom business objects embed the tenant's "BO company id" between the app
 // name and the resource:
@@ -42,7 +42,7 @@ public static class WcpApp
         return (app, resource);
     }
 
-    // Build the WCP Extend App REST URL for a custom BO, or null if the name
+    // Build the Extend API URL for a custom BO, or null if the name
     // doesn't carry the company-id marker (i.e. it isn't a writable custom BO).
     public static string? WcpAppUrl(string? apiBase, string? boCompanyId, string boName)
     {
