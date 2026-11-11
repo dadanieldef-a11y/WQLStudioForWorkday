@@ -1,0 +1,7 @@
+releases/WQLStudio.zip
+# Build output and published releases (attach the exe to a GitHub release instead)
+bin/
+obj/
+releases/
+.vs/
+*.user

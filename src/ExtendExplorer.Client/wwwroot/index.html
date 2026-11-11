@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>WQL Studio — Toad for Workday Extend</title>
+    <base href="/" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+        rel="stylesheet" />
+    <link rel="stylesheet" href="css/app.css" />
+    <link rel="icon" href="wqlstudio-icon.ico" sizes="any" />
+    <link rel="icon" type="image/png" sizes="32x32" href="wqlstudio-icon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="wqlstudio-icon-16x16.png" />
+    <link rel="apple-touch-icon" href="wqlstudio-icon-128x128.png" />
+</head>
+
+<body>
+    <div id="app">
+        <div class="loading-progress-text" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;font-family:system-ui;color:#8b949e;background:#0d1117">
+            Loading WQL Studio…
+        </div>
+    </div>
+
+    <div id="blazor-error-ui">
+        An unhandled error has occurred.
+        <a href="" class="reload">Reload</a>
+        <a class="dismiss">🗙</a>
+    </div>
+
+    <script src="_framework/blazor.webassembly.js"></script>
+    <script src="js/interop.js"></script>
+    <script src="js/monaco-wql.js"></script>
+</body>
+
+</html>

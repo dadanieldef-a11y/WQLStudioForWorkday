@@ -1,0 +1,746 @@
+@namespace ExtendExplorer.Client.Components
+@inject WqlMetadata Meta
+@inject Interop Interop
+@using System.Diagnostics
+@using System.Text.RegularExpressions
+
+@* The workbench orchestrator: schema tree + resizable divider + editor + result
+   pane, with Select/Insert/Update/Delete/Export modes and their dialogs. Port of
+   components/Explorer.tsx.
+
+   Supporting pieces live elsewhere so this file stays about wiring:
+     - PaneLayout      (Services)   tree width / editor height + drag state
+     - WqlQuery        (Services)   parse / EnsureWorkdayId / StripComments
+     - WqlMetadata.CollectIdsAsync  id collection for Bulk edit
+     - ModeActionBar   (Components) the per-mode action strip *@
+
+<div class="explorer">
+    <header class="app-head">
+        <div class="brand">
+            <img class="brand-logo" src="wqlstudio-icon-64x64.png" alt="WQL Studio" width="26" height="26" />
+            <span class="brand-name">WQL Studio</span>
+            <span class="brand-sub">WQL workbench</span>
+        </div>
+        <div class="head-right">
+            <a class="guide-link" href="guide.html" target="_blank" rel="noopener" title="Open the user guide in a new tab">📖 Guide</a>
+            @if (!string.IsNullOrEmpty(Tenant))
+            {
+                <span class="head-tenant" title="Active connection">@Tenant</span>
+            }
+            <button class="signout" @onclick="@(() => OnSignOut.InvokeAsync())">Sign out</button>
+        </div>
+    </header>
+
+    <div class="workspace" style="@($"grid-template-columns: {_layout.TreeWidth}px 6px 1fr")">
+        <SchemaTree OnInsert="InsertText"
+                    OnUseSource="UseSource"
+                    OnApplyFromClause="ApplyFromClause"
+                    OnSourcesLoaded="OnSourcesLoaded"
+                    Mode="_mode"
+                    BoCompanyId="@BoCompanyId" />
+
+        <div class="col-resizer@(_layout.DraggingColumn ? " active" : "")"
+             @onmousedown="@(e => _layout.StartColumn(e.ClientX))" @onmousedown:preventDefault="true"
+             role="separator" aria-orientation="vertical"
+             title="Drag to resize the schema pane"></div>
+
+        <main class="main">
+            <Toolbar Running="_running"
+                     Mode="_mode"
+                     OnModeChange="OnModeChange"
+                     Limit="_limit"
+                     OnLimitChange="@(n => _limit = n)"
+                     OnRun="Run"
+                     OnExport="ExportCsv"
+                     OnSaveQuery="SaveQuery"
+                     OnLoadQuery="LoadQuery"
+                     CanExport="@(_result is not null && _result.Rows.Count > 0)"
+                     Exporting="_exporting"
+                     RowCount="@(_result is not null ? _result.Rows.Count : (long?)null)"
+                     Total="@(_result?.Total)"
+                     ElapsedMs="_elapsed" />
+
+            <div class="editor-pane" style="height:@(_layout.EditorHeight)px">
+                <QueryEditor @ref="Editor" Value="@_query" ValueChanged="OnQueryChanged" OnRun="Run" />
+            </div>
+
+            <div class="row-resizer@(_layout.DraggingRow ? " active" : "")"
+                 @onmousedown="@(e => _layout.StartRow(e.ClientY))" @onmousedown:preventDefault="true"
+                 role="separator" aria-orientation="horizontal"
+                 title="Drag to resize the editor"></div>
+
+            <div class="result-pane">
+                @if (_history.Count > 0)
+                {
+                    <div class="drill-bar">
+                        <button class="drill-back" @onclick="Back">↩ Back</button>
+                        <span class="drill-depth">drilled @_history.Count level@(_history.Count == 1 ? "" : "s") deep</span>
+                    </div>
+                }
+
+                <ModeActionBar Active="ActiveBar"
+                               Source="@_ranSource"
+                               Total="@(_result?.Total)"
+                               RowsLoaded="@(_result?.Rows.Count ?? 0)"
+                               SelectedCount="_selectedKeys.Count"
+                               BulkLoading="_bulkLoading"
+                               BulkError="@_bulkError"
+                               OnDelete="@(() => _deleteOpen = true)"
+                               OnDeleteAll="OpenDeleteAll"
+                               OnBulkEdit="OpenBulk"
+                               OnBulkInsert="@(() => _bulkInsertOpen = true)"
+                               OnNewRecord="@(() => { _cloneId = null; _insertOpen = true; })"
+                               OnImport="@(() => _importOpen = true)"
+                               OnExport="@(() => _exportOpen = true)" />
+
+                <div class="result-body">
+                    @if (_error is not null)
+                    {
+                        <div class="error-box">
+                            <span class="error-tag">WQL error</span>
+                            <pre>@_error</pre>
+                        </div>
+                    }
+                    else if (_result is not null)
+                    {
+                        <ResultsGrid Columns="_result.Columns"
+                                     Rows="_result.Rows"
+                                     StartIndex="_offset"
+                                     Sort="SortInfo"
+                                     OnColumnAction="ApplyColumnAction"
+                                     OnDrill="DrillTo"
+                                     OnAppendRef="AppendRef"
+                                     Selectable="CanDelete"
+                                     Editable="CanUpdate"
+                                     Cloneable="CanInsert"
+                                     KeyColumn="@KeyColumn"
+                                     SelectedKeys="_selectedKeys"
+                                     ColumnTypes="_columnTypes"
+                                     OnToggleRow="ToggleRow"
+                                     OnToggleAll="ToggleAll"
+                                     OnEditRow="@(k => _editId = k)"
+                                     OnCloneRow="@(k => _cloneId = k)" />
+                    }
+                    else
+                    {
+                        <div class="grid-empty">
+                            Pick a data source on the left, or press<span style="margin-left:8px">🟢</span> to run the query above.
+                            Click a reference chip in the results to drill into it.
+                        </div>
+                    }
+                </div>
+                @if (_result is not null && _error is null)
+                {
+                    <Pager Offset="_offset"
+                           PageRows="_result.Rows.Count"
+                           Limit="_limit"
+                           Total="@(_result.Total)"
+                           Running="_running"
+                           OnPrev="@(() => PageBy(-_limit))"
+                           OnNext="@(() => PageBy(_limit))" />
+                }
+            </div>
+        </main>
+    </div>
+
+    @* ── dialogs ─────────────────────────────────────────────────────── *@
+
+    @if (_deleteOpen && CanDelete && _ranSource is not null)
+    {
+        <DeleteDialog BoName="@_ranSource"
+                      Ids="@_selectedKeys.ToList()"
+                      OnClose="@(() => _deleteOpen = false)"
+                      OnDeleted="@(_ => AfterDelete())" />
+    }
+
+    @if (_deleteAllIds is not null && CanDelete && _ranSource is not null)
+    {
+        <DeleteDialog BoName="@_ranSource"
+                      Ids="_deleteAllIds"
+                      DeleteAll="true"
+                      OnClose="@(() => _deleteAllIds = null)"
+                      OnDeleted="@(_ => AfterDelete())"
+                      OnExportFirst="ExportBeforeDelete" />
+    }
+
+    @if (_editId is not null && CanUpdate && _ranSource is not null)
+    {
+        <UpdateDialog @key="_editId" BoName="@_ranSource" Id="@_editId"
+                      DataSourceId="@DsId()"
+                      OnClose="@(() => _editId = null)"
+                      OnSaved="Rerun" />
+    }
+
+    @if (_bulkOpen && CanUpdate && _ranSource is not null && _bulkIds.Count > 0)
+    {
+        <BulkUpdateDialog BoName="@_ranSource"
+                          Ids="_bulkIds"
+                          Columns="@(_result?.Columns ?? new())"
+                          DataSourceId="@DsId()"
+                          OnClose="@(() => _bulkOpen = false)"
+                          OnDone="Rerun" />
+    }
+
+    @if ((_insertOpen || _cloneId is not null) && CanInsert && _ranSource is not null)
+    {
+        <InsertDialog @key="@($"{_insertOpen}-{_cloneId}")"
+                      BoName="@_ranSource"
+                      Columns="@(_result?.Columns ?? new())"
+                      CloneFromId="@_cloneId"
+                      DataSourceId="@DsId()"
+                      OnClose="@(() => { _insertOpen = false; _cloneId = null; })"
+                      OnInserted="Rerun" />
+    }
+
+    @if (_bulkInsertOpen && CanInsert && _ranSource is not null)
+    {
+        <BulkInsertDialog BoName="@_ranSource"
+                          DataSourceId="@DsId()"
+                          OnClose="@(() => _bulkInsertOpen = false)"
+                          OnInserted="Rerun" />
+    }
+
+    @if (_exportOpen && CanExportAll && _ranSource is not null && _executedWql is not null)
+    {
+        <ExportDialog BoName="@_ranSource"
+                      Wql="@_executedWql"
+                      Total="@(_result?.Total)"
+                      OnClose="@(() => _exportOpen = false)" />
+    }
+
+    @if (_importOpen && CanExportAll && _ranSource is not null)
+    {
+        <ImportDialog BoName="@_ranSource"
+                      DataSourceId="@DsId()"
+                      OnClose="@(() => _importOpen = false)"
+                      OnImported="Rerun" />
+    }
+
+    @if (_layout.Dragging)
+    {
+        <div class="drag-overlay" style="cursor:@(_layout.DraggingRow ? "row-resize" : "col-resize")"
+             @onmousemove="@(e => _layout.Move(e.ClientX, e.ClientY))"
+             @onmouseup="_layout.EndAsync"></div>
+    }
+</div>
+
+@code {
+    [Parameter] public string? Tenant { get; set; }
+    [Parameter] public string? BoCompanyId { get; set; }
+    [Parameter] public EventCallback OnSignOut { get; set; }
+
+    private const string Starter = "SELECT workdayID\nFROM allWorkers";
+    private const int BulkMax = 1000;
+
+    private QueryEditor? Editor;
+    private PaneLayout _layout = default!;
+
+    // ── editor / execution state ─────────────────────────────────────────
+    private string _query = Starter;
+    private int _limit = 100;
+    private QueryMode _mode = QueryMode.Select;
+
+    private bool _running;
+    private WqlResult? _result;
+    private string? _error;
+    private long? _elapsed;
+    private int _offset;
+    private bool _exporting;
+
+    private string? _executedWql;
+    private string? _ranSource;
+    private string? _ranSelect;
+    private readonly List<string> _history = new();
+
+    // ── metadata ─────────────────────────────────────────────────────────
+    private readonly Dictionary<string, string> _dsIndex = new(); // alias(lower) → data-source WID
+    private Dictionary<string, string>? _columnTypes;              // column alias → WQL type
+    private string? _columnTypesFor;                               // which data-source WID they're for
+
+    // ── write-mode / dialog state ────────────────────────────────────────
+    private readonly HashSet<string> _selectedKeys = new();
+    private bool _deleteOpen;
+    private List<string>? _deleteAllIds;   // non-null = Delete all dialog open
+    private string? _editId;
+    private bool _bulkOpen;
+    private List<string> _bulkIds = new();
+    private bool _bulkLoading;
+    private string? _bulkError;
+    private bool _insertOpen;
+    private bool _bulkInsertOpen;
+    private bool _exportOpen;
+    private bool _importOpen;
+    private string? _cloneId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _layout = new PaneLayout(Interop);
+        await _layout.LoadAsync();
+    }
+
+    private void OnQueryChanged(string v) => _query = v;
+
+    // Build the alias→WID index the write dialogs use to fetch field metadata by
+    // data-source id (from the tree's initial load).
+    private void OnSourcesLoaded(List<DataSourceDto> list)
+    {
+        _dsIndex.Clear();
+        foreach (var d in list)
+            if (!string.IsNullOrEmpty(d.Alias) && !string.IsNullOrEmpty(d.Id))
+                _dsIndex[d.Alias.ToLowerInvariant()] = d.Id;
+    }
+
+    // The data-source WID for the currently-queried source, or null.
+    private string? DsId() =>
+        !string.IsNullOrEmpty(_ranSource) && _dsIndex.TryGetValue(_ranSource!.ToLowerInvariant(), out var id)
+            ? id
+            : null;
+
+    // Fetch (once per data source) the alias → type map the results grid uses to
+    // pick the right column-menu filters. Silent on failure — the grid falls back
+    // to inferring from the rows.
+    private async Task LoadColumnTypesAsync()
+    {
+        var dsId = DsId();
+        if (dsId is null || _columnTypesFor == dsId) return;
+        try
+        {
+            var map = await Meta.FetchFieldTypesAsync(dsId);
+            _columnTypes = map;
+            _columnTypesFor = dsId;
+            StateHasChanged();
+        }
+        catch (RedirectingToLoginException) { }
+        catch { /* grid falls back to row inference */ }
+    }
+
+    // ── computed ─────────────────────────────────────────────────────────
+    private string KeyColumn =>
+        _result?.Columns.FirstOrDefault(c => c.Equals("workdayid", StringComparison.OrdinalIgnoreCase))
+        ?? "workdayID";
+
+    private (string Column, SortDir Dir)? SortInfo
+    {
+        get
+        {
+            var p = _executedWql is not null ? WqlEdit.ParseOrderBy(_executedWql) : null;
+            return p is not null ? (p.Field, p.Dir) : null;
+        }
+    }
+
+    // A non-Select mode applies only once results are loaded for one of this
+    // tenant's custom BOs. Export is read-only but scoped the same way: it's for
+    // backing up your own object before a delete, not dumping delivered data.
+    private bool ModeApplies(QueryMode m) =>
+        _mode == m && _result is not null && !string.IsNullOrEmpty(_ranSource)
+        && !string.IsNullOrEmpty(BoCompanyId) && Wcp.IsCustomBo(_ranSource!, BoCompanyId);
+
+    private bool CanDelete => ModeApplies(QueryMode.Delete);
+    private bool CanUpdate => ModeApplies(QueryMode.Update);
+    private bool CanInsert => ModeApplies(QueryMode.Insert);
+    private bool CanExportAll => ModeApplies(QueryMode.Export);
+
+    // Which action strip to show above the grid (Update only once rows exist).
+    private QueryMode? ActiveBar =>
+        CanDelete ? QueryMode.Delete
+        : CanUpdate && _result!.Rows.Count > 0 ? QueryMode.Update
+        : CanInsert ? QueryMode.Insert
+        : CanExportAll ? QueryMode.Export
+        : null;
+
+    // ── execution ────────────────────────────────────────────────────────
+    private async Task Execute(string wql, int off)
+    {
+        if (string.IsNullOrEmpty(wql) || _running) return;
+        _running = true;
+        _error = null;
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            var res = await Meta.RunWqlAsync(wql, _limit, off);
+            var prev = _executedWql;
+            _result = res;
+            _elapsed = sw.ElapsedMilliseconds;
+            _executedWql = wql;
+            _offset = off;
+            (_ranSource, _ranSelect) = WqlQuery.Parse(wql);
+            if (prev != wql) ResetSelectionState();
+            // Field types drive the column menus (boolean → true/false, numeric →
+            // comparisons). Loaded in the background so results render straight
+            // away, and cached per data source.
+            _ = LoadColumnTypesAsync();
+        }
+        catch (RedirectingToLoginException) { /* navigating away */ }
+        catch (Exception e)
+        {
+            _error = e.Message;
+            _result = null;
+            _elapsed = null;
+        }
+        finally
+        {
+            _running = false;
+        }
+    }
+
+    private Task Run() => RunCore(null);
+
+    private async Task RunCore(string? explicitWql)
+    {
+        var wql = WqlQuery.StripComments(explicitWql ?? _query).Trim();
+        if (_mode != QueryMode.Select)
+        {
+            if (string.IsNullOrEmpty(BoCompanyId))
+            {
+                _error = "Set a BO Company ID on this connection to use Insert, Update or Delete mode.";
+                return;
+            }
+            var src = WqlQuery.Parse(wql).Source;
+            if (string.IsNullOrEmpty(src) || !Wcp.IsCustomBo(src, BoCompanyId))
+            {
+                _error = $"{_mode.ToLabel()} mode works only on custom BOs (those containing “_{BoCompanyId}_”). Pick one from the tree.";
+                return;
+            }
+            wql = WqlQuery.EnsureWorkdayId(wql);
+        }
+        await Execute(wql, 0);
+    }
+
+    private async Task PageBy(int delta)
+    {
+        if (string.IsNullOrEmpty(_executedWql) || _running) return;
+        await Execute(_executedWql, Math.Max(0, _offset + delta));
+    }
+
+    // Re-run the last query from the first page (after a write changed the data).
+    private async Task Rerun()
+    {
+        if (!string.IsNullOrEmpty(_executedWql)) await Execute(_executedWql, 0);
+    }
+
+    // Replace the editor text (and optionally place the cursor / focus it).
+    private async Task SetEditorAsync(string text, (int Line, int Col)? cursor = null, bool focus = false)
+    {
+        _query = text;
+        if (Editor is null) return;
+        await Editor.SetValueAsync(text);
+        if (cursor is { } c) await Editor.SetPositionAsync(c.Line, c.Col);
+        if (focus) await Editor.FocusAsync();
+    }
+
+    // ── schema-driven query building ─────────────────────────────────────
+    private async Task InsertText(string text)
+    {
+        if (Editor is null)
+        {
+            _query = string.IsNullOrEmpty(_query) ? text : $"{_query} {text}";
+            return;
+        }
+        await Editor.InsertAtCursorAsync(text);
+        await Editor.FocusAsync();
+    }
+
+    private async Task UseSource(string alias)
+    {
+        // Export wants the whole object, so build an explicit SELECT of every
+        // field rather than leaving the list for the user to fill in.
+        if (_mode == QueryMode.Export)
+        {
+            await UseSourceForExport(alias);
+            return;
+        }
+        await ApplyFromClause(alias);
+    }
+
+    // SELECT every field of the chosen source, workdayID first. Falls back to
+    // just workdayID if the field list can't be loaded.
+    private async Task UseSourceForExport(string alias)
+    {
+        var fieldList = await AllFieldsListAsync(alias);
+        if (fieldList is null) return;   // redirecting to login
+        await SetEditorAsync($"SELECT {fieldList}\nFROM {alias}", focus: true);
+    }
+
+    // Comma-separated list of every field on a data source, workdayID first.
+    // "workdayID" alone if the fields can't be loaded; null if redirecting to login.
+    private async Task<string?> AllFieldsListAsync(string alias)
+    {
+        var fieldList = "workdayID";
+        if (_dsIndex.TryGetValue(alias.ToLowerInvariant(), out var dsId))
+        {
+            try
+            {
+                var (fields, _) = await Meta.FetchFieldsPageAsync(dsId, 0, 2000);
+                var aliases = fields
+                    .Select(f => f.Alias)
+                    .Where(a => !string.IsNullOrEmpty(a))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(a => a.Equals("workdayID", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+                    .ThenBy(a => a, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                if (aliases.Count > 0)
+                {
+                    if (!aliases.Any(a => a.Equals("workdayID", StringComparison.OrdinalIgnoreCase)))
+                        aliases.Insert(0, "workdayID");
+                    fieldList = string.Join(", ", aliases);
+                }
+            }
+            catch (RedirectingToLoginException) { return null; }
+            catch { /* fall back to workdayID only */ }
+        }
+        return fieldList;
+    }
+
+    // Start a query on a source (or a filtered FROM clause). Write modes pre-fill
+    // workdayID; Select leaves the cursor in an empty select list.
+    private async Task ApplyFromClause(string fromClause)
+    {
+        var writeMode = _mode != QueryMode.Select;
+        var text = writeMode ? $"SELECT workdayID\nFROM {fromClause}" : $"SELECT \nFROM {fromClause}";
+        await SetEditorAsync(text, (1, writeMode ? 17 : 8), focus: true);
+    }
+
+    private async Task DrillTo((string Field, string Id) a)
+    {
+        if (string.IsNullOrEmpty(_ranSource)) return;
+        var cols = !string.IsNullOrEmpty(_ranSelect) && _ranSelect != "*" ? _ranSelect : a.Field;
+        var safeId = Regex.Replace(a.Id, @"[()\s]", "");
+        var wql = $"SELECT {cols}\nFROM {_ranSource}\nWHERE {a.Field} in ({safeId})";
+        if (!string.IsNullOrEmpty(_executedWql)) _history.Add(_executedWql);
+        await SetEditorAsync(wql);
+        await RunCore(wql);
+    }
+
+    // Ctrl/Cmd/Alt-click on a reference chip: add a filter for that reference to
+    // the current editor query (placed before any GROUP BY / ORDER BY / LIMIT),
+    // and leave it for the user to run — no auto-run, and the rest of their query
+    // is preserved. Clicking several chips in the same column merges the ids into
+    // one `in (…)` list rather than ANDing two `in` predicates (which matches
+    // nothing).
+    private async Task AppendRef((string Field, string Id) a)
+    {
+        var baseWql = Editor is not null ? await Editor.GetValueAsync() : _query;
+        var safeId = Regex.Replace(a.Id, @"[()\s]", "");
+        await SetEditorAsync(WqlEdit.AddInFilter(baseWql, a.Field, safeId));
+    }
+
+    private async Task Back()
+    {
+        if (_history.Count == 0) return;
+        var prev = _history[^1];
+        _history.RemoveAt(_history.Count - 1);
+        await SetEditorAsync(prev);
+        await RunCore(prev);
+    }
+
+    // ── CSV export (whole result set) ────────────────────────────────────
+    private async Task ExportCsv()
+    {
+        if (string.IsNullOrEmpty(_executedWql) || _exporting || _running) return;
+        _exporting = true;
+        try
+        {
+            const int maxRows = 100_000;
+            // Pages the full result set (100 per request — the gateway cap — 5 in
+            // flight); the toolbar Limit only governs what's shown on screen.
+            var (cols, allRows) = await Meta.FetchAllRowsAsync(_executedWql, maxRows);
+            var csv = WqlFormat.ToCsv(cols, allRows);
+            var stamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH-mm-ss");
+            await Interop.DownloadCsvAsync($"wql-export-{stamp}.csv", csv);
+        }
+        catch (RedirectingToLoginException) { }
+        catch (Exception e) { _error = e.Message; }
+        finally { _exporting = false; }
+    }
+
+    // ── save / load the editor query to a file ───────────────────────────
+    private async Task SaveQuery()
+    {
+        // Open a native Save As dialog (pick name/location, or overwrite). Use the
+        // already-synced editor text rather than an awaited read, so the dialog
+        // opens within the click's user-activation window.
+        await Interop.SaveTextAsAsync("query.wql", _query ?? "");
+    }
+
+    private Task LoadQuery(string text) => SetEditorAsync(text);
+
+    // ── header-menu actions ──────────────────────────────────────────────
+    private async Task ApplyColumnAction((string Column, ColumnAction Action, string? Value) a)
+    {
+        var baseWql = _executedWql ?? _query;
+        string next;
+        switch (a.Action)
+        {
+            case ColumnAction.SortAsc:
+                next = WqlEdit.SetOrderBy(baseWql, a.Column, SortDir.Asc);
+                break;
+            case ColumnAction.SortDesc:
+                next = WqlEdit.SetOrderBy(baseWql, a.Column, SortDir.Desc);
+                break;
+            case ColumnAction.Contains:
+                if (string.IsNullOrEmpty(a.Value)) return;
+                next = WqlEdit.SetColumnFilter(baseWql, a.Column, WqlEdit.ContainsCondition(a.Column, a.Value));
+                break;
+            case ColumnAction.Blank:
+                next = WqlEdit.SetColumnFilter(baseWql, a.Column, WqlEdit.EmptyCondition(a.Column, false));
+                break;
+            case ColumnAction.NotBlank:
+                next = WqlEdit.SetColumnFilter(baseWql, a.Column, WqlEdit.EmptyCondition(a.Column, true));
+                break;
+            case ColumnAction.BoolEquals:
+                next = WqlEdit.SetColumnFilter(baseWql, a.Column,
+                    WqlEdit.BoolCondition(a.Column, a.Value == "true"));
+                break;
+            case ColumnAction.Compare:
+                // Value is "<op> <value>", e.g. ">= 5000".
+                if (string.IsNullOrWhiteSpace(a.Value)) return;
+                var sp = a.Value!.IndexOf(' ');
+                if (sp <= 0) return;
+                next = WqlEdit.SetColumnFilter(baseWql, a.Column,
+                    WqlEdit.CompareCondition(a.Column, a.Value[..sp], a.Value[(sp + 1)..]));
+                break;
+            default:
+                return;
+        }
+        await SetEditorAsync(next);
+        await RunCore(next);
+    }
+
+    // ── selection ────────────────────────────────────────────────────────
+    private void ToggleRow(string key)
+    {
+        if (!_selectedKeys.Remove(key)) _selectedKeys.Add(key);
+    }
+
+    private void ToggleAll((List<string> Keys, bool Select) a)
+    {
+        foreach (var k in a.Keys)
+        {
+            if (a.Select) _selectedKeys.Add(k);
+            else _selectedKeys.Remove(k);
+        }
+    }
+
+    private void OnModeChange(QueryMode m)
+    {
+        _mode = m;
+        ResetSelectionState();
+    }
+
+    private void ResetSelectionState()
+    {
+        _selectedKeys.Clear();
+        _deleteAllIds = null;
+        _editId = null;
+        _bulkOpen = false;
+        _bulkIds = new();
+        _bulkError = null;
+        _insertOpen = false;
+        _bulkInsertOpen = false;
+        _exportOpen = false;
+        _importOpen = false;
+        _cloneId = null;
+    }
+
+    // ── bulk edit ────────────────────────────────────────────────────────
+    private async Task OpenBulk()
+    {
+        if (_result is null || string.IsNullOrEmpty(_executedWql)) return;
+        _bulkError = null;
+        if (_result.Total is long total && total > BulkMax)
+        {
+            _bulkError = $"{total:N0} rows match — bulk edit is capped at {BulkMax}. Add a narrower WHERE.";
+            return;
+        }
+        _bulkLoading = true;
+        try
+        {
+            var (ids, overflow) = await Meta.CollectIdsAsync(_executedWql, KeyColumn, BulkMax);
+            if (overflow)
+            {
+                _bulkError = $"More than {BulkMax} rows match — bulk edit is capped at {BulkMax}. Add a narrower WHERE.";
+                return;
+            }
+            if (ids.Count == 0)
+            {
+                _bulkError = "No rows matched.";
+                return;
+            }
+            _bulkIds = ids;
+            _bulkOpen = true;
+        }
+        catch (RedirectingToLoginException) { }
+        catch { _bulkError = "Couldn't collect matching rows."; }
+        finally { _bulkLoading = false; }
+    }
+
+    private async Task AfterDelete()
+    {
+        _selectedKeys.Clear();
+        await Rerun();
+    }
+
+    // ── delete all (every row the query matches) ──────────────────────────────
+    // Pages through the executed query collecting every workdayID (not just the
+    // grid's page), capped at DeleteAllMax, then opens the Delete dialog in its
+    // Delete-all form, which warns to export a JSON backup first. The server
+    // deletes in bulk batches of 100.
+    private const int DeleteAllMax = 1000;
+
+    private async Task OpenDeleteAll()
+    {
+        if (_result is null || string.IsNullOrEmpty(_executedWql)) return;
+        _bulkError = null;
+        if (_result.Total is long total && total > DeleteAllMax)
+        {
+            _bulkError = $"{total:N0} rows match — Delete all is capped at {DeleteAllMax:N0}. Add a narrower WHERE.";
+            return;
+        }
+        _bulkLoading = true;
+        try
+        {
+            var (ids, overflow) = await Meta.CollectIdsAsync(_executedWql, KeyColumn, DeleteAllMax);
+            if (overflow)
+            {
+                _bulkError = $"More than {DeleteAllMax:N0} rows match — Delete all is capped at {DeleteAllMax:N0}. Add a narrower WHERE.";
+                return;
+            }
+            if (ids.Count == 0)
+            {
+                _bulkError = "No rows matched.";
+                return;
+            }
+            _deleteOpen = false;
+            _deleteAllIds = ids.Distinct().ToList();
+        }
+        catch (RedirectingToLoginException) { }
+        catch { _bulkError = "Couldn't collect matching rows."; }
+        finally { _bulkLoading = false; }
+    }
+
+    // "Go to Export" from the Delete-all warning. The current query may select
+    // only a few fields, so rather than exporting it as-is, switch to Export mode
+    // and load the same query (same FROM / WHERE, so the same rows) with every
+    // field of the BO selected. The user runs it and exports from there, then
+    // comes back to Delete mode to delete.
+    private async Task ExportBeforeDelete()
+    {
+        var source = _ranSource;
+        var baseWql = _executedWql;
+        _deleteAllIds = null;
+        if (string.IsNullOrEmpty(source) || string.IsNullOrEmpty(baseWql)) return;
+
+        var fieldList = await AllFieldsListAsync(source);
+        if (fieldList is null) return;   // redirecting to login
+
+        OnModeChange(QueryMode.Export);
+        // Drop the old (partial-field) results so "Export all rows" only appears
+        // once the all-fields query has been run.
+        _result = null;
+        _executedWql = null;
+        _error = null;
+        _elapsed = null;
+        _history.Clear();
+        await SetEditorAsync(WqlQuery.ReplaceSelectList(baseWql, fieldList), focus: true);
+    }
+}

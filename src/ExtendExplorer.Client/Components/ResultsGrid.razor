@@ -1,0 +1,429 @@
+@namespace ExtendExplorer.Client.Components
+@inject Interop Interop
+
+@* Results table: reference chips (drillable), multi-instance expanders, scalar
+   cells, a per-column header menu (sort / contains / blank), and a row-number
+   column that becomes a checkbox (delete), edit pencil (update) or clone button
+   (insert) depending on mode. Port of components/ResultsGrid.tsx. *@
+
+@if (Columns.Count == 0)
+{
+    <div class="grid-empty">No columns. Run a query to see results here.</div>
+}
+else
+{
+    <div class="grid-scroll" @onscroll="@(() => { _menu = null; })">
+        <table class="grid">
+            <thead>
+                <tr>
+                    <th class="rownum">
+                        @if (Selectable)
+                        {
+                            <input id="@HeaderCbId" type="checkbox"
+                                   checked="@AllSelected"
+                                   disabled="@(PageKeys.Count == 0)"
+                                   @onchange="@(e => OnToggleAll.InvokeAsync((PageKeys, (bool)(e.Value ?? false))))"
+                                   aria-label="Select all rows on this page" />
+                        }
+                        else
+                        {
+                            @("#")
+                        }
+                    </th>
+                    @foreach (var c in Columns)
+                    {
+                        <th @key="c">
+                            <div class="th-inner">
+                                <span class="th-label">@c</span>
+                                @if (Sort is not null && Sort.Value.Column == c)
+                                {
+                                    <span class="th-sort">@(Sort.Value.Dir == SortDir.Asc ? "▲" : "▼")</span>
+                                }
+                                @if (OnColumnAction.HasDelegate)
+                                {
+                                    <button class="th-menu-btn"
+                                            @onclick="@(e => OpenMenu(c, e))"
+                                            aria-label="@($"Options for {c}")"
+                                            title="Column options">
+                                        ⋯
+                                    </button>
+                                }
+                            </div>
+                        </th>
+                    }
+                </tr>
+            </thead>
+            <tbody>
+                @for (var i = 0; i < Rows.Count; i++)
+                {
+                    var rowIdx = i;
+                    var row = Rows[i];
+                    <tr @key="rowIdx">
+                        <td class="rownum">
+                            @{
+                                var k = KeyColumn is not null ? RowKey(row, KeyColumn) : "";
+                            }
+                            @if (Selectable)
+                            {
+                                <input type="checkbox"
+                                       checked="@(!string.IsNullOrEmpty(k) && (SelectedKeys?.Contains(k) ?? false))"
+                                       disabled="@string.IsNullOrEmpty(k)"
+                                       @onchange="@(() => { if (!string.IsNullOrEmpty(k)) OnToggleRow.InvokeAsync(k); })"
+                                       aria-label="Select row" />
+                            }
+                            else if (Editable)
+                            {
+                                <button class="row-edit" disabled="@string.IsNullOrEmpty(k)"
+                                        @onclick="@(() => { if (!string.IsNullOrEmpty(k)) OnEditRow.InvokeAsync(k); })"
+                                        title="Edit record" aria-label="Edit record">✎</button>
+                            }
+                            else if (Cloneable)
+                            {
+                                <button class="row-edit" disabled="@string.IsNullOrEmpty(k)"
+                                        @onclick="@(() => { if (!string.IsNullOrEmpty(k)) OnCloneRow.InvokeAsync(k); })"
+                                        title="Clone into a new record" aria-label="Clone record">⧉</button>
+                            }
+                            else
+                            {
+                                @(StartIndex + rowIdx + 1)
+                            }
+                        </td>
+                        @foreach (var c in Columns)
+                        {
+                            <td @key="c">
+                                @RenderCell(row, c, rowIdx)
+                            </td>
+                        }
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+
+    @if (_menu is not null && OnColumnAction.HasDelegate)
+    {
+        <div style="position:fixed;inset:0;z-index:40" @onclick="@(() => { _menu = null; })"></div>
+        <div class="col-menu" style="@($"position:fixed;left:{_menu.Value.X}px;top:{_menu.Value.Y}px;z-index:41")">
+            <div class="col-menu-head">@_menu.Value.Column</div>
+            <button class="col-menu-item" @onclick="@(() => Act(ColumnAction.SortAsc))">↑ Sort ascending</button>
+            <button class="col-menu-item" @onclick="@(() => Act(ColumnAction.SortDesc))">↓ Sort descending</button>
+            <div class="col-menu-sep"></div>
+            @{
+                var kind = ColumnKind(_menu.Value.Column);
+            }
+            @if (kind == ColKind.Boolean)
+            {
+                @* Booleans filter with = true / = false; contains and blank don't apply. *@
+                <div class="col-menu-contains">
+                    <select class="col-menu-input" value="@_boolTerm"
+                            @onchange="@(e => { _boolTerm = e.Value?.ToString() ?? "true"; })">
+                        <option value="true">true</option>
+                        <option value="false">false</option>
+                    </select>
+                    <button class="col-menu-apply" @onclick="@(() => Act(ColumnAction.BoolEquals, _boolTerm))">
+                        Apply
+                    </button>
+                </div>
+            }
+            else if (kind is ColKind.Numeric or ColKind.Date)
+            {
+                @* Numbers and dates compare rather than "contain". *@
+                <div class="col-menu-contains">
+                    <select class="col-menu-op" value="@_op"
+                            @onchange="@(e => { _op = e.Value?.ToString() ?? "="; })">
+                        <option value="=">=</option>
+                        <option value="&gt;">&gt;</option>
+                        <option value="&gt;=">&gt;=</option>
+                        <option value="&lt;">&lt;</option>
+                        <option value="&lt;=">&lt;=</option>
+                    </select>
+                    <input class="col-menu-input" type="@(kind == ColKind.Date ? "date" : "number")"
+                           step="any"
+                           value="@_term"
+                           @oninput="@(e => { _term = e.Value?.ToString() ?? ""; })"
+                           @onkeydown="OnCompareKey" />
+                    <button class="col-menu-apply" @onclick="ApplyCompare" disabled="@string.IsNullOrWhiteSpace(_term)">
+                        Apply
+                    </button>
+                </div>
+                <div class="col-menu-sep"></div>
+                <button class="col-menu-item" @onclick="@(() => Act(ColumnAction.Blank))">Is blank</button>
+                <button class="col-menu-item" @onclick="@(() => Act(ColumnAction.NotBlank))">Is not blank</button>
+            }
+            else if (kind == ColKind.Reference)
+            {
+                @* Instance fields filter by id — use the chips in the grid (Ctrl-click
+                   adds one to the query); text matching doesn't apply. *@
+                <button class="col-menu-item" @onclick="@(() => Act(ColumnAction.Blank))">Is blank</button>
+                <button class="col-menu-item" @onclick="@(() => Act(ColumnAction.NotBlank))">Is not blank</button>
+            }
+            else
+            {
+                <div class="col-menu-contains">
+                    <input class="col-menu-input" placeholder="contains…"
+                           value="@_term"
+                           @oninput="@(e => { _term = e.Value?.ToString() ?? ""; })"
+                           @onkeydown="OnContainsKey" />
+                    <button class="col-menu-apply" @onclick="ApplyContains" disabled="@string.IsNullOrWhiteSpace(_term)">
+                        Apply
+                    </button>
+                </div>
+                <div class="col-menu-sep"></div>
+                <button class="col-menu-item" @onclick="@(() => Act(ColumnAction.Blank))">Is blank</button>
+                <button class="col-menu-item" @onclick="@(() => Act(ColumnAction.NotBlank))">Is not blank</button>
+            }
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public List<string> Columns { get; set; } = new();
+    [Parameter] public List<Dictionary<string, JsonElement>> Rows { get; set; } = new();
+    [Parameter] public int StartIndex { get; set; }
+    [Parameter] public (string Column, SortDir Dir)? Sort { get; set; }
+    [Parameter] public EventCallback<(string Column, ColumnAction Action, string? Value)> OnColumnAction { get; set; }
+    [Parameter] public EventCallback<(string Field, string Id)> OnDrill { get; set; }
+    [Parameter] public EventCallback<(string Field, string Id)> OnAppendRef { get; set; }
+    [Parameter] public bool Selectable { get; set; }
+    [Parameter] public bool Editable { get; set; }
+    [Parameter] public bool Cloneable { get; set; }
+    [Parameter] public string? KeyColumn { get; set; }
+    [Parameter] public HashSet<string>? SelectedKeys { get; set; }
+    [Parameter] public Dictionary<string, string>? ColumnTypes { get; set; }
+    [Parameter] public EventCallback<string> OnToggleRow { get; set; }
+    [Parameter] public EventCallback<(List<string> Keys, bool Select)> OnToggleAll { get; set; }
+    [Parameter] public EventCallback<string> OnEditRow { get; set; }
+    [Parameter] public EventCallback<string> OnCloneRow { get; set; }
+
+    private const string HeaderCbId = "grid-select-all";
+    private (string Column, double X, double Y)? _menu;
+    private string _term = "";
+    private string _boolTerm = "true";
+    private string _op = "=";
+    private readonly HashSet<string> _openMulti = new();
+
+    private enum ColKind { Text, Boolean, Numeric, Date, Reference }
+
+    // What kind of filter menu a column gets. The schema (ColumnTypes) is
+    // authoritative and works even when a query returns no rows; falling back to
+    // the loaded values only matters when the schema hasn't arrived.
+    private ColKind ColumnKind(string column)
+    {
+        if (ColumnTypes is not null && ColumnTypes.TryGetValue(column, out var t))
+        {
+            var s = (t ?? "").ToLowerInvariant();
+            if (s.Contains("boolean")) return ColKind.Boolean;
+            if (s.Contains("numeric") || s.Contains("currency") || s.Contains("decimal")
+                || s.Contains("integer")) return ColKind.Numeric;
+            if (s.Contains("date") || s.Contains("moment") || s.Contains("time")) return ColKind.Date;
+            if (s.Contains("instance")) return ColKind.Reference;
+            if (s.Length > 0) return ColKind.Text;
+        }
+        return InferKindFromRows(column);
+    }
+
+    // Fallback when the schema isn't loaded: judge by the values on this page.
+    private ColKind InferKindFromRows(string column)
+    {
+        var sawBool = false;
+        var sawNumber = false;
+        var sawRef = false;
+        foreach (var row in Rows)
+        {
+            if (!row.TryGetValue(column, out var v)) continue;
+            if (v.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) continue;
+            if (v.ValueKind is JsonValueKind.True or JsonValueKind.False) { sawBool = true; continue; }
+            if (v.ValueKind == JsonValueKind.Number) { sawNumber = true; continue; }
+            if (v.ValueKind is JsonValueKind.Object or JsonValueKind.Array) { sawRef = true; continue; }
+            return ColKind.Text;
+        }
+        if (sawBool && !sawNumber && !sawRef) return ColKind.Boolean;
+        if (sawNumber && !sawBool && !sawRef) return ColKind.Numeric;
+        if (sawRef && !sawBool && !sawNumber) return ColKind.Reference;
+        return ColKind.Text;
+    }
+
+    private bool DrillEnabled => OnDrill.HasDelegate;
+
+    private List<string> PageKeys => Selectable && KeyColumn is not null
+        ? Rows.Select(r => RowKey(r, KeyColumn)).Where(k => !string.IsNullOrEmpty(k)).ToList()
+        : new();
+
+    private bool AllSelected => PageKeys.Count > 0 && PageKeys.All(k => SelectedKeys?.Contains(k) ?? false);
+    private bool SomeSelected => PageKeys.Any(k => SelectedKeys?.Contains(k) ?? false);
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (Selectable)
+            await Interop.SetIndeterminateAsync(HeaderCbId, SomeSelected && !AllSelected);
+    }
+
+    private async Task OpenMenu(string column, MouseEventArgs e)
+    {
+        if (_menu is not null && _menu.Value.Column == column)
+        {
+            _menu = null;
+            return;
+        }
+        _term = "";
+        _boolTerm = "true";
+        _op = "=";
+        var width = await Interop.InnerWidthAsync();
+        _menu = (column, Math.Min(e.ClientX, width - 210), e.ClientY + 8);
+    }
+
+    private async Task Act(ColumnAction action, string? value = null)
+    {
+        var col = _menu?.Column;
+        _menu = null;
+        if (col is not null)
+            await OnColumnAction.InvokeAsync((col, action, value));
+    }
+
+    private async Task ApplyContains()
+    {
+        var t = _term.Trim();
+        if (!string.IsNullOrEmpty(t)) await Act(ColumnAction.Contains, t);
+    }
+
+    private async Task OnContainsKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await ApplyContains();
+    }
+
+    private async Task ApplyCompare()
+    {
+        var t = _term.Trim();
+        if (!string.IsNullOrEmpty(t)) await Act(ColumnAction.Compare, $"{_op} {t}");
+    }
+
+    private async Task OnCompareKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await ApplyCompare();
+    }
+
+    private void ToggleMulti(string key)
+    {
+        if (!_openMulti.Remove(key)) _openMulti.Add(key);
+    }
+
+    // The delete/edit/clone key for a row: a reference's id, or the scalar
+    // value stringified.
+    private static string RowKey(Dictionary<string, JsonElement> row, string keyColumn)
+    {
+        if (!row.TryGetValue(keyColumn, out var v)) return "";
+        if (v.ValueKind == JsonValueKind.Null || v.ValueKind == JsonValueKind.Undefined) return "";
+        if (WqlFormat.IsReference(v)) return WqlFormat.RefId(v) ?? "";
+        return v.ValueKind == JsonValueKind.String ? (v.GetString() ?? "") : v.GetRawText();
+    }
+
+    private RenderFragment RenderCell(Dictionary<string, JsonElement> row, string column, int rowIdx) => builder =>
+    {
+        JsonElement? cell = row.TryGetValue(column, out var el) ? el : null;
+        var kind = WqlFormat.Kind(cell);
+
+        if (kind == CellKind.Empty)
+        {
+            builder.OpenElement(0, "span");
+            builder.AddAttribute(1, "class", "cell-empty");
+            builder.AddContent(2, "—");
+            builder.CloseElement();
+            return;
+        }
+
+        if (kind == CellKind.Reference && cell is not null)
+        {
+            AddRefChip(builder, 3, WqlFormat.RefDescriptor(cell.Value), WqlFormat.RefId(cell.Value), column, small: false);
+            return;
+        }
+
+        if (kind == CellKind.Multi && cell is not null)
+        {
+            var mkey = $"{rowIdx}|{column}";
+            var open = _openMulti.Contains(mkey);
+            var items = cell.Value.EnumerateArray().ToList();
+            builder.OpenElement(10, "div");
+            builder.AddAttribute(11, "class", "multi");
+
+            builder.OpenElement(12, "button");
+            builder.AddAttribute(13, "class", "multi-toggle");
+            builder.AddAttribute(14, "onclick", EventCallback.Factory.Create(this, () => ToggleMulti(mkey)));
+            builder.AddContent(15, $"{(open ? "▾" : "▸")} {items.Count} item{(items.Count == 1 ? "" : "s")}");
+            builder.CloseElement();
+
+            if (open)
+            {
+                builder.OpenElement(16, "div");
+                builder.AddAttribute(17, "class", "multi-list");
+                var seq = 18;
+                foreach (var item in items)
+                {
+                    if (WqlFormat.IsReference(item))
+                    {
+                        AddRefChip(builder, seq, WqlFormat.RefDescriptor(item), WqlFormat.RefId(item), column, small: true);
+                    }
+                    else
+                    {
+                        builder.OpenElement(seq, "span");
+                        builder.AddAttribute(seq + 1, "class", "multi-item");
+                        builder.AddContent(seq + 2, WqlFormat.DisplayValue(item));
+                        builder.CloseElement();
+                    }
+                    seq += 10;
+                }
+                builder.CloseElement();
+            }
+            builder.CloseElement();
+            return;
+        }
+
+        builder.OpenElement(40, "span");
+        builder.AddAttribute(41, "class", "cell-scalar");
+        builder.AddContent(42, WqlFormat.DisplayValue(cell));
+        builder.CloseElement();
+    };
+
+    // Plain click drills into the referenced instance; Ctrl/Cmd/Alt-click instead
+    // appends a filter for this reference to the current query (no auto-run).
+    private async Task ChipClicked(MouseEventArgs e, string field, string id)
+    {
+        if ((e.CtrlKey || e.MetaKey || e.AltKey) && OnAppendRef.HasDelegate)
+            await OnAppendRef.InvokeAsync((field, id));
+        else
+            await OnDrill.InvokeAsync((field, id));
+    }
+
+    private void AddRefChip(Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder builder,
+        int seq, string label, string? id, string field, bool small)
+    {
+        var canDrill = DrillEnabled && !string.IsNullOrEmpty(id);
+        var cls = $"chip{(small ? " chip-sm" : "")}{(canDrill ? " drillable" : "")}";
+        var title = !string.IsNullOrEmpty(id)
+            ? $"id: {id}{(canDrill ? $" · click to drill in · Ctrl-click to add a {field} filter" : "")}"
+            : null;
+
+        if (canDrill)
+        {
+            builder.OpenElement(seq, "button");
+            builder.AddAttribute(seq + 1, "class", cls);
+            if (title is not null) builder.AddAttribute(seq + 2, "title", title);
+            builder.AddAttribute(seq + 3, "onclick",
+                EventCallback.Factory.Create<MouseEventArgs>(this, e => ChipClicked(e, field, id!)));
+            builder.AddContent(seq + 4, label);
+            builder.OpenElement(seq + 5, "span");
+            builder.AddAttribute(seq + 6, "class", "chip-drill");
+            builder.AddAttribute(seq + 7, "aria-hidden", "true");
+            builder.AddContent(seq + 8, "⤵");
+            builder.CloseElement();
+            builder.CloseElement();
+        }
+        else
+        {
+            builder.OpenElement(seq, "span");
+            builder.AddAttribute(seq + 1, "class", cls);
+            if (title is not null) builder.AddAttribute(seq + 2, "title", title);
+            builder.AddContent(seq + 3, label);
+            builder.CloseElement();
+        }
+    }
+}

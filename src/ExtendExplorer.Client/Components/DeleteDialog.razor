@@ -1,0 +1,187 @@
+@namespace ExtendExplorer.Client.Components
+@inject ApiClient Api
+@using System.Net
+
+@* Confirm → execute → per-row results for deleting custom-BO instances.
+   Nothing is sent until the user confirms; the running phase can't be
+   dismissed; the done phase reports each id's outcome.
+   With DeleteAll (every row in the grid) the confirm phase adds a backup
+   warning pointing at Export (JSON, re-importable) and requires an explicit
+   acknowledgement before Delete is enabled.
+   Port of components/DeleteDialog.tsx. *@
+
+<div class="modal-overlay">
+    <div class="modal" @onclick:stopPropagation="true">
+        <div class="modal-head">
+            <div>
+                <div class="modal-title">@(_phase == "done" ? "Delete results" : DeleteAll ? "Delete all rows" : "Delete records")</div>
+                <div class="modal-sub">@BoName</div>
+            </div>
+            @if (_phase != "running")
+            {
+                <button class="modal-x" @onclick="OnClose">×</button>
+            }
+        </div>
+
+        <div class="modal-body">
+            @if (_phase == "confirm")
+            {
+                <p class="del-warn">
+                    This permanently deletes @Ids.Count record@(Ids.Count == 1 ? "" : "s")@(DeleteAll ? ", every row this query matches," : "") from this
+                    custom business object. This can’t be undone.
+                </p>
+                @if (DeleteAll)
+                {
+                    <div class="note-inline">
+                        <div style="font-weight:600;margin-bottom:6px">⚠️ With Great Power comes Great Responsibility!</div>
+                        <strong>Back up first.</strong> Before deleting, use <strong>Export</strong> to save
+                        these rows — with all their fields — to a <strong>JSON</strong> file. JSON exports can be imported back
+                        (Export mode → <em>Import rows</em>, or Insert mode → <em>Bulk insert</em>)
+                        if you need to restore the data. CSV exports can’t be re-imported.
+                        <div style="margin-top:8px">
+                            <button class="btn" @onclick="OnExportFirst">⤓ Go to Export (all fields)…</button>
+                        </div>
+                        <div style="margin-top:6px;opacity:.8">
+                            Opens Export mode with this query’s rows and every field selected. Run it,
+                            click <em>Export all rows</em> (JSON), then return to Delete mode.
+                        </div>
+                    </div>
+                    <label style="display:flex;gap:8px;align-items:center;margin:10px 0">
+                        <input type="checkbox" checked="@_ack" @onchange="@(e => _ack = e.Value is true)" />
+                        I’ve exported a backup, or I don’t need one.
+                    </label>
+                }
+                @if (_error is not null)
+                {
+                    <div class="connect-error">@_error</div>
+                }
+                <div class="del-idlist">
+                    @foreach (var id in Ids)
+                    {
+                        <div class="del-id" @key="id">@id</div>
+                    }
+                </div>
+            }
+            else if (_phase == "running")
+            {
+                <p class="del-warn">Deleting @Ids.Count record@(Ids.Count == 1 ? "" : "s")…</p>
+            }
+            else if (_phase == "done")
+            {
+                <p class="del-summary">
+                    @_okCount deleted@(_failCount > 0 ? $", {_failCount} failed" : "").
+                </p>
+                @if (_target is not null)
+                {
+                    <div class="del-target" title="@_target">DELETE @_target</div>
+                }
+                <div class="del-idlist">
+                    @foreach (var r in _results)
+                    {
+                        <div class="del-result@(r.Ok ? " ok" : " fail")" @key="r.Id">
+                            <span class="del-result-id">@r.Id</span>
+                            <span class="del-result-status">
+                                @(r.Ok ? "deleted" : $"{(r.Status != 0 ? r.Status.ToString() : "error")}{(string.IsNullOrEmpty(r.Error) ? "" : $" · {r.Error}")}")
+                            </span>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+
+        <div class="modal-foot">
+            @if (_phase == "confirm")
+            {
+                <button class="btn" @onclick="OnClose">Cancel</button>
+                <button class="btn btn-danger" @onclick="Run" disabled="@(Ids.Count == 0 || (DeleteAll && !_ack))">
+                    Delete @(DeleteAll ? "all " : "")@Ids.Count
+                </button>
+            }
+            else if (_phase == "running")
+            {
+                <button class="btn" disabled>Deleting…</button>
+            }
+            else if (_phase == "done")
+            {
+                <button class="btn btn-primary" @onclick="Finish">Done</button>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string BoName { get; set; } = "";
+    [Parameter] public List<string> Ids { get; set; } = new();
+    [Parameter] public EventCallback OnClose { get; set; }
+    [Parameter] public EventCallback<int> OnDeleted { get; set; }
+    // Delete-all mode: show the backup warning + acknowledgement.
+    [Parameter] public bool DeleteAll { get; set; }
+    // "Go to Export" — the parent closes this dialog, switches to Export mode and
+    // loads the same query with every field selected.
+    [Parameter] public EventCallback OnExportFirst { get; set; }
+
+    private bool _ack;
+
+    private string _phase = "confirm"; // confirm | running | done
+    private List<DeleteResultRow> _results = new();
+    private string? _target;
+    private string? _error;
+    private int _okCount;
+    private int _failCount;
+
+    private async Task Run()
+    {
+        _phase = "running";
+        _error = null;
+        try
+        {
+            var (status, body) = await Api.PostRawAsync("/api/workday/delete",
+                new DeleteRequest { BoName = BoName, Ids = Ids });
+            if (status < 200 || status >= 300)
+            {
+                _error = status == (int)HttpStatusCode.Unauthorized
+                    ? "Not authorized (401). The session token may not be scoped for the WCP App API, or it has expired — sign out and reconnect if it persists."
+                    : ErrorFrom(body) is { } msg ? $"Delete failed: {msg}" : $"Delete failed ({status})";
+                _phase = "confirm";
+                return;
+            }
+            var data = Deserialize<DeleteResponse>(body);
+            _results = data?.Results ?? new();
+            _target = data?.Target;
+            _okCount = _results.Count(r => r.Ok);
+            _failCount = _results.Count - _okCount;
+            _phase = "done";
+        }
+        catch (Exception e)
+        {
+            _error = e.Message;
+            _phase = "confirm";
+        }
+    }
+
+    private async Task Finish()
+    {
+        await OnDeleted.InvokeAsync(_okCount);
+        await OnClose.InvokeAsync();
+    }
+
+    private static T? Deserialize<T>(string body)
+    {
+        try { return JsonSerializer.Deserialize<T>(body, ApiClient.JsonOpts); }
+        catch { return default; }
+    }
+
+    private static string? ErrorFrom(string body)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("error", out var e)
+                && e.ValueKind == JsonValueKind.String)
+                return e.GetString();
+        }
+        catch { }
+        return null;
+    }
+}

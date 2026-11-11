@@ -1,0 +1,446 @@
+@namespace ExtendExplorer.Client.Components
+@inject ApiClient Api
+@inject BoFields BoFieldsSvc
+@using System.Net
+@using System.Text.Json.Nodes
+@using System.Text.RegularExpressions
+
+@* Paste many rows (tab/comma-delimited with a header row, or a JSON array) and
+   insert them into a custom BO, chunked so no request exceeds the host timeout.
+   Port of components/BulkInsertDialog.tsx. *@
+
+<div class="modal-overlay">
+    <div class="modal modal-wide modal-xl" @onclick:stopPropagation="true">
+        <div class="modal-head">
+            <div>
+                <div class="modal-title">@(_phase == "done" ? "Bulk insert result" : "Bulk insert records")</div>
+                <div class="modal-sub">@BoName</div>
+            </div>
+            @if (!_busy)
+            {
+                <button class="modal-x" @onclick="OnClose">×</button>
+            }
+        </div>
+
+        <div class="modal-body rec-body">
+            @if (_error is not null)
+            {
+                <div class="connect-error">@_error</div>
+            }
+
+            @if (_phase == "edit")
+            {
+                <p class="bulk-hint">
+                    Paste rows with a header row of field names (tab- or comma-separated — a spreadsheet
+                    copy works), or a JSON array of objects. Empty cells are skipped. Up to @MaxRows rows.
+                </p>
+
+                @if (_meta.Count > 0)
+                {
+                    <details class="bulk-fields">
+                        <summary>Available fields (@_meta.Count)</summary>
+                        <div class="bulk-cols">
+                            @foreach (var f in _meta)
+                            {
+                                <code class="bulk-col">@f.Key@(f.Kind == "reference" ? " ·id" : f.Type != "string" ? $" ·{f.Type}" : "")</code>
+                            }
+                        </div>
+                    </details>
+                }
+
+                <textarea class="rec-input rec-json" spellcheck="false" rows="18"
+                          value="@_text"
+                          @oninput="OnTextInput"></textarea>
+
+                @if (_parsed.Error is not null)
+                {
+                    <div class="bulk-err">@_parsed.Error</div>
+                }
+
+                @if (_parsed.Records.Count > 0)
+                {
+                    <p class="del-warn">
+                        @_parsed.Records.Count row@(_parsed.Records.Count == 1 ? "" : "s") ready@(_tooMany ? $" — over the {MaxRows}-row limit" : "").
+                        @if (_parsed.UnknownHeaders.Count > 0)
+                        {
+                            <span class="bulk-warn"> Not known fields: @string.Join(", ", _parsed.UnknownHeaders) (sent as-is; Workday may reject them).</span>
+                        }
+                    </p>
+
+                    <div class="bulk-preview-wrap">
+                        <table class="bulk-preview">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    @foreach (var h in PreviewCols)
+                                    {
+                                        <th @key="h">@h</th>
+                                    }
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @for (var i = 0; i < Math.Min(PreviewRows, _parsed.Records.Count); i++)
+                                {
+                                    var rec = _parsed.Records[i];
+                                    <tr @key="i">
+                                        <td>@(i + 1)</td>
+                                        @foreach (var h in PreviewCols)
+                                        {
+                                            <td @key="h">@CellText(rec.TryGetValue(h, out var cv) ? cv : null)</td>
+                                        }
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                    @if (_parsed.Records.Count > PreviewRows)
+                    {
+                        <p class="bulk-hint">…and @(_parsed.Records.Count - PreviewRows) more.</p>
+                    }
+                }
+
+                @if (_parsed.RowErrors.Count > 0)
+                {
+                    <div class="bulk-err">
+                        @_parsed.RowErrors.Count row@(_parsed.RowErrors.Count == 1 ? "" : "s") skipped:
+                        @string.Join(", ", _parsed.RowErrors.Take(5).Select(e => $"line {e.Line} ({e.Message})"))@(_parsed.RowErrors.Count > 5 ? "…" : "")
+                    </div>
+                }
+            }
+
+            @if (_phase == "running")
+            {
+                <p class="del-warn">
+                    Inserting… @_progress/@_parsed.Records.Count row@(_parsed.Records.Count == 1 ? "" : "s") (@ChunkSize per request).
+                </p>
+                @ResultList
+            }
+
+            @if (_phase == "done")
+            {
+                <p class="del-summary">@OkCount inserted@(FailCount > 0 ? $", {FailCount} failed" : "").</p>
+                @if (_droppedAll.Count > 0)
+                {
+                    <p class="del-warn">Read-only fields dropped: @string.Join(", ", _droppedAll).</p>
+                }
+                @ResultList
+            }
+        </div>
+
+        <div class="modal-foot">
+            @if (_phase == "edit" || _phase == "running")
+            {
+                <button class="btn" @onclick="OnClose" disabled="@_busy">Cancel</button>
+                <button class="btn btn-primary del-go" @onclick="Insert" disabled="@(!CanInsert)">
+                    @(_phase == "running" ? "Inserting…" : $"Insert {(_parsed.Records.Count > 0 ? _parsed.Records.Count.ToString() : "")} row{(_parsed.Records.Count == 1 ? "" : "s")}")
+                </button>
+            }
+            else if (_phase == "done")
+            {
+                <button class="btn btn-primary" @onclick="Finish">Done</button>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string BoName { get; set; } = "";
+    [Parameter] public string? DataSourceId { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+    [Parameter] public EventCallback OnInserted { get; set; }
+
+    private const int MaxRows = 2000;
+    private const int ChunkSize = 100;
+    private const int PreviewRows = 5;
+
+    private static readonly HashSet<string> SystemKeys = new()
+    {
+        "id", "href", "descriptor", "wid", "workdayID", "createdMoment", "updatedMoment",
+    };
+
+    private sealed class RowResult
+    {
+        public int Index;
+        public bool Ok;
+        public int Status;
+        public string? Id;
+        public string? Error;
+        public List<string>? Dropped;
+    }
+
+    private sealed class Parsed
+    {
+        public List<string> Headers = new();
+        public List<Dictionary<string, object?>> Records = new();
+        public List<string> UnknownHeaders = new();
+        public List<(int Line, string Message)> RowErrors = new();
+        public string? Error;
+    }
+
+    private List<BoFieldDto> _meta = new();
+    private string _text = "";
+    private string _phase = "edit"; // edit | running | done
+    private string? _error;
+    private readonly List<RowResult> _results = new();
+    private int _progress;
+    private Parsed _parsed = new();
+    private List<string> _droppedAll = new();
+
+    private bool _busy => _phase == "running";
+    private bool _tooMany => _parsed.Records.Count > MaxRows;
+    private bool CanInsert => _phase == "edit" && _parsed.Records.Count > 0 && _parsed.Error is null && !_tooMany;
+    private List<string> PreviewCols => _parsed.Headers.Where(h => !string.IsNullOrEmpty(h)).ToList();
+    private int OkCount => _results.Count(r => r.Ok);
+    private int FailCount => _results.Count - OkCount;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!string.IsNullOrEmpty(DataSourceId))
+        {
+            var m = await BoFieldsSvc.FetchByIdAsync(DataSourceId);
+            if (m is not null) { _meta = m; _parsed = ParsePaste(_text, _meta); }
+        }
+    }
+
+    private void OnTextInput(ChangeEventArgs e)
+    {
+        _text = e.Value?.ToString() ?? "";
+        _parsed = ParsePaste(_text, _meta);
+    }
+
+    private async Task Insert()
+    {
+        var all = _parsed.Records;
+        _phase = "running";
+        _error = null;
+        _results.Clear();
+        _progress = 0;
+
+        // Insert in chunks from the browser so no single request can exceed the
+        // host's response timeout; merge each chunk's per-row results as they
+        // arrive so a stalled chunk never loses the ones already done.
+        for (var start = 0; start < all.Count; start += ChunkSize)
+        {
+            var chunk = all.Skip(start).Take(ChunkSize).ToList();
+            try
+            {
+                var (status, body) = await Api.PostRawAsync("/api/workday/insert-bulk",
+                    new { boName = BoName, records = chunk });
+                if (status == (int)HttpStatusCode.Unauthorized) { Api.RedirectToLogin(); return; }
+                if (status < 200 || status >= 300)
+                {
+                    var msg = status is 504 or 502
+                        ? "timed out — these rows may or may not have inserted; verify"
+                        : $"chunk failed: {ErrorFrom(body) ?? status.ToString()}";
+                    for (var i = 0; i < chunk.Count; i++)
+                        _results.Add(new RowResult { Index = start + i, Ok = false, Status = status, Error = msg });
+                }
+                else
+                {
+                    var data = Deserialize<InsertBulkResponse>(body);
+                    foreach (var r in data?.Results ?? new())
+                        _results.Add(new RowResult
+                        {
+                            Index = start + r.Index,
+                            Ok = r.Ok,
+                            Status = r.Status,
+                            Id = r.Id,
+                            Error = r.Error,
+                            Dropped = r.Dropped,
+                        });
+                }
+            }
+            catch (Exception e)
+            {
+                for (var i = 0; i < chunk.Count; i++)
+                    _results.Add(new RowResult { Index = start + i, Ok = false, Status = 0, Error = e.Message });
+            }
+            _progress = Math.Min(start + ChunkSize, all.Count);
+            StateHasChanged(); // show progress between chunks
+        }
+
+        _droppedAll = _results.SelectMany(r => r.Dropped ?? new()).Distinct().ToList();
+        _phase = "done";
+    }
+
+    private async Task Finish()
+    {
+        await OnInserted.InvokeAsync();
+        await OnClose.InvokeAsync();
+    }
+
+    private RenderFragment ResultList => builder =>
+    {
+        builder.OpenElement(0, "div");
+        builder.AddAttribute(1, "class", "del-idlist");
+        var seq = 2;
+        foreach (var r in _results)
+        {
+            builder.OpenElement(seq, "div");
+            builder.SetKey(r.Index);
+            builder.AddAttribute(seq + 1, "class", $"del-result{(r.Ok ? " ok" : " fail")}");
+            builder.OpenElement(seq + 2, "span");
+            builder.AddAttribute(seq + 3, "class", "del-result-id");
+            builder.AddContent(seq + 4, $"Row {r.Index + 1}{(r.Ok && !string.IsNullOrEmpty(r.Id) ? $" · {r.Id}" : "")}");
+            builder.CloseElement();
+            builder.OpenElement(seq + 5, "span");
+            builder.AddAttribute(seq + 6, "class", "del-result-status");
+            builder.AddContent(seq + 7, r.Ok
+                ? "created"
+                : $"{(r.Status != 0 ? r.Status.ToString() : "error")}{(string.IsNullOrEmpty(r.Error) ? "" : $" · {r.Error}")}");
+            builder.CloseElement();
+            builder.CloseElement();
+            seq += 10;
+        }
+        builder.CloseElement();
+    };
+
+    // ── paste parsing (port of parsePaste) ───────────────────────────────
+    private Parsed ParsePaste(string text, List<BoFieldDto> meta)
+    {
+        var result = new Parsed();
+        var t = text.Trim();
+        if (string.IsNullOrEmpty(t)) return result;
+
+        var byLc = new Dictionary<string, BoFieldDto>();
+        foreach (var m in meta) byLc[m.Key.ToLowerInvariant()] = m;
+        string Canon(string h) => byLc.TryGetValue(h.ToLowerInvariant(), out var m) ? m.Key : h;
+
+        // JSON mode
+        if (t[0] == '[' || t[0] == '{')
+        {
+            JsonNode? arr;
+            try { arr = JsonNode.Parse(t); }
+            catch (Exception e) { result.Error = $"Invalid JSON: {e.Message}"; return result; }
+            var list = arr is JsonArray ja ? ja.ToList() : new List<JsonNode?> { arr };
+            var headerSeen = new HashSet<string>();
+            var idx = 0;
+            foreach (var o in list)
+            {
+                idx++;
+                if (o is not JsonObject obj)
+                {
+                    result.RowErrors.Add((idx, "not an object"));
+                    continue;
+                }
+                var rec = new Dictionary<string, object?>();
+                foreach (var kv in obj)
+                {
+                    var k = kv.Key;
+                    if (SystemKeys.Contains(k)) continue;
+                    var v = kv.Value;
+                    if (v is null) continue;
+                    if (v is JsonValue sv0 && sv0.TryGetValue<string>(out var s0) && s0 == "") continue;
+                    var ck = Canon(k);
+                    if (headerSeen.Add(ck)) result.Headers.Add(ck);
+                    rec[ck] = CoerceJsonValue(v, byLc.GetValueOrDefault(k.ToLowerInvariant()));
+                }
+                if (rec.Count > 0) result.Records.Add(rec);
+            }
+            result.UnknownHeaders = result.Headers.Where(h => !byLc.ContainsKey(h.ToLowerInvariant())).ToList();
+            return result;
+        }
+
+        // delimited mode
+        var lines = Regex.Split(t, "\r\n?|\n").Where(l => l.Trim().Length > 0).ToList();
+        if (lines.Count < 2)
+        {
+            result.Error = "Add a header row of field names and at least one data row.";
+            return result;
+        }
+        var delim = lines[0].Contains('\t') ? "\t" : ",";
+        var rawHeaders = SplitLine(lines[0], delim).Select(h => h.Trim()).ToList();
+        for (var li = 1; li < lines.Count; li++)
+        {
+            var cells = SplitLine(lines[li], delim);
+            var rec = new Dictionary<string, object?>();
+            for (var ci = 0; ci < rawHeaders.Count; ci++)
+            {
+                var h = rawHeaders[ci];
+                if (string.IsNullOrEmpty(h) || SystemKeys.Contains(h)) continue;
+                var raw = (ci < cells.Count ? cells[ci] : "").Trim();
+                if (raw.Length == 0) continue;
+                rec[Canon(h)] = CoerceCell(raw, byLc.GetValueOrDefault(h.ToLowerInvariant()));
+            }
+            if (rec.Count > 0) result.Records.Add(rec);
+        }
+        result.Headers = rawHeaders.Select(Canon).ToList();
+        result.UnknownHeaders = result.Headers.Where(h => !string.IsNullOrEmpty(h) && !byLc.ContainsKey(h.ToLowerInvariant())).ToList();
+        return result;
+    }
+
+    // Coerce one pasted string cell to the type its field expects.
+    private static object? CoerceCell(string v, BoFieldDto? m)
+    {
+        if (m?.Kind == "reference") return new { id = v.Trim() };
+        if (m?.Type == "number") return double.TryParse(v, out var n) ? n : v;
+        if (m?.Type == "boolean") return Regex.IsMatch(v.Trim(), "^(true|1|yes)$", RegexOptions.IgnoreCase);
+        return v;
+    }
+
+    // A value that arrived already-typed (JSON mode): strings go through cell
+    // coercion; everything else keeps its parsed node.
+    private static object? CoerceJsonValue(JsonNode? v, BoFieldDto? m)
+    {
+        if (v is JsonValue jv && jv.TryGetValue<string>(out var s)) return CoerceCell(s, m);
+        return v;
+    }
+
+    // Split a delimited line into cells. Tab is a plain split; comma honours
+    // double-quoted fields.
+    private static List<string> SplitLine(string line, string delim)
+    {
+        if (delim == "\t") return line.Split('\t').ToList();
+        var outp = new List<string>();
+        var cur = new System.Text.StringBuilder();
+        var inQ = false;
+        for (var i = 0; i < line.Length; i++)
+        {
+            var c = line[i];
+            if (inQ)
+            {
+                if (c == '"')
+                {
+                    if (i + 1 < line.Length && line[i + 1] == '"') { cur.Append('"'); i++; }
+                    else inQ = false;
+                }
+                else cur.Append(c);
+            }
+            else if (c == '"') inQ = true;
+            else if (c == ',') { outp.Add(cur.ToString()); cur.Clear(); }
+            else cur.Append(c);
+        }
+        outp.Add(cur.ToString());
+        return outp;
+    }
+
+    private static string CellText(object? v)
+    {
+        if (v is null) return "";
+        if (v is string s) return s;
+        if (v is bool b) return b ? "true" : "false";
+        if (v is double d) return d.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        try { return JsonSerializer.Serialize(v); }
+        catch { return v.ToString() ?? ""; }
+    }
+
+    private static T? Deserialize<T>(string body)
+    {
+        try { return JsonSerializer.Deserialize<T>(body, ApiClient.JsonOpts); }
+        catch { return default; }
+    }
+
+    private static string? ErrorFrom(string body)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("error", out var e)
+                && e.ValueKind == JsonValueKind.String)
+                return e.GetString();
+        }
+        catch { }
+        return null;
+    }
+}

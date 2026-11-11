@@ -1,0 +1,134 @@
+@namespace ExtendExplorer.Client.Components
+
+@* Collects a data source filter + its prompt values, then builds the FROM
+   clause. An input's type decides how its value is formatted into WQL.
+   Port of components/PromptDialog.tsx. *@
+
+<div class="modal-overlay">
+    <div class="modal" role="dialog" aria-label="@($"Prompts for {Source.Alias}")"
+         @onclick:stopPropagation="true">
+        <div class="modal-head">
+            <div>
+                <div class="modal-title">Filters &amp; prompts</div>
+                <div class="modal-sub">@Source.Alias</div>
+            </div>
+            <button class="modal-x" @onclick="OnClose" aria-label="Close">✕</button>
+        </div>
+
+        <div class="modal-body">
+            @if (Filters.Count > 1)
+            {
+                <label class="prompt-field">
+                    <span class="prompt-label">Data source filter</span>
+                    <select class="prompt-input" value="@_filterAlias" @onchange="OnFilterChanged">
+                        @foreach (var f in Filters)
+                        {
+                            <option value="@f.Alias" title="@f.Descriptor" selected="@(f.Alias == _filterAlias)">@f.Alias</option>
+                        }
+                    </select>
+                </label>
+            }
+
+            @if (ActiveFilter is not null)
+            {
+                <div class="filter-desc">@ActiveFilter.Descriptor</div>
+            }
+
+            @if (Prompts.Count == 0)
+            {
+                <div class="prompt-none">This filter takes no prompt values.</div>
+            }
+            else
+            {
+                @foreach (var p in Prompts)
+                {
+                    <label class="prompt-field" @key="p.Alias">
+                        <span class="prompt-label">
+                            @p.Alias
+                            @if (p.Required)
+                            {
+                                <span class="req">*</span>
+                            }
+                            <span class="prompt-type">@p.Type</span>
+                        </span>
+                        @{
+                            var t = (p.Type ?? "").ToLowerInvariant();
+                        }
+                        @if (t == "boolean")
+                        {
+                            <select class="prompt-input"
+                                    value="@(GetVal(p.Alias) is { Length: > 0 } bv ? bv : "false")"
+                                    @onchange="@(e => SetValue(p.Alias, e.Value?.ToString() ?? ""))">
+                                <option value="true">true</option>
+                                <option value="false">false</option>
+                            </select>
+                        }
+                        else
+                        {
+                            <input class="prompt-input"
+                                   type="@(t == "date" ? "date" : "text")"
+                                   value="@GetVal(p.Alias)"
+                                   placeholder="@(t.Contains("instance") ? "instance WID" : p.Type)"
+                                   @oninput="@(e => SetValue(p.Alias, e.Value?.ToString() ?? ""))" />
+                        }
+                    </label>
+                }
+            }
+        </div>
+
+        <div class="modal-foot">
+            <button class="btn" @onclick="OnClose">Cancel</button>
+            <button class="btn btn-primary" @onclick="Apply" disabled="@MissingRequired"
+                    title="@(MissingRequired ? "Fill required prompts first" : null)">
+                Build query
+            </button>
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public DataSourceDto Source { get; set; } = default!;
+    [Parameter] public List<FilterDto> Filters { get; set; } = new();
+    [Parameter] public EventCallback<string> OnApply { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private string _filterAlias = "";
+    private readonly Dictionary<string, string> _values = new();
+
+    protected override void OnParametersSet()
+    {
+        // Default to the first filter; "" means built-in prompts only.
+        if (string.IsNullOrEmpty(_filterAlias))
+            _filterAlias = Filters.Count > 0 ? Filters[0].Alias : "";
+    }
+
+    private FilterDto? ActiveFilter => Filters.FirstOrDefault(f => f.Alias == _filterAlias);
+    private List<PromptDto> Prompts => ActiveFilter?.Prompts ?? new();
+
+    private string GetVal(string alias) => _values.TryGetValue(alias, out var v) ? v : "";
+    private void SetValue(string alias, string v) => _values[alias] = v;
+
+    private bool MissingRequired =>
+        Prompts.Any(p => p.Required && string.IsNullOrWhiteSpace(GetVal(p.Alias)));
+
+    private void OnFilterChanged(ChangeEventArgs e)
+    {
+        _filterAlias = e.Value?.ToString() ?? "";
+        _values.Clear();
+    }
+
+    private async Task Apply()
+    {
+        var filled = Prompts.Select(p => new FilledPrompt
+        {
+            Alias = p.Alias,
+            Type = p.Type,
+            Value = GetVal(p.Alias),
+        });
+        var clause = WqlFormat.BuildFromClause(
+            Source.Alias,
+            string.IsNullOrEmpty(_filterAlias) ? null : _filterAlias,
+            filled);
+        await OnApply.InvokeAsync(clause);
+    }
+}

@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Output exe/dll name = the app's brand. Project + namespaces stay
+         ExtendExplorer.* internally; only the built file is renamed. -->
+    <AssemblyName>WQLStudio</AssemblyName>
+	<ApplicationIcon>..\ExtendExplorer.Client\wwwroot\wqlstudio.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.Server" Version="8.0.32" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ExtendExplorer.Client\ExtendExplorer.Client.csproj" />
+    <ProjectReference Include="..\ExtendExplorer.Shared\ExtendExplorer.Shared.csproj" />
+  </ItemGroup>
+
+</Project>

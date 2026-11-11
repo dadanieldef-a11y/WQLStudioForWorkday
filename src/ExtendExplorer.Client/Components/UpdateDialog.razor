@@ -1,0 +1,318 @@
+@namespace ExtendExplorer.Client.Components
+@inject ApiClient Api
+@inject BoFields BoFieldsSvc
+@using System.Net
+@using System.Text.Json.Nodes
+
+@* Edit a single custom-BO record: load its writable fields (BO describe) + the
+   current values (WCP record), PATCH only the changed ones. System/derived
+   fields are shown read-only. Port of components/UpdateDialog.tsx. *@
+
+<div class="modal-overlay">
+    <div class="modal modal-wide" @onclick:stopPropagation="true">
+        <div class="modal-head">
+            <div>
+                <div class="modal-title">@(_phase == "done" ? "Update result" : "Edit record")</div>
+                <div class="modal-sub">@BoName · @Id</div>
+            </div>
+            @if (!_busy)
+            {
+                <button class="modal-x" @onclick="OnClose">×</button>
+            }
+        </div>
+
+        <div class="modal-body rec-body">
+            @if (_phase == "loading")
+            {
+                <p class="del-warn">Loading record…</p>
+            }
+            @if (_error is not null)
+            {
+                <div class="connect-error">@_error</div>
+            }
+
+            @if (_phase == "edit" || _phase == "saving")
+            {
+                @foreach (var f in _fields)
+                {
+                    <div class="rec-field" @key="f.Key">
+                        <label class="rec-key">
+                            @f.Key
+                            @if (f.Kind == "reference")
+                            {
+                                <span class="rec-ro"> id</span>
+                            }
+                            @if (f.ReadOnly)
+                            {
+                                <span class="rec-ro"> read-only</span>
+                            }
+                        </label>
+                        @if (f.Kind == "reference")
+                        {
+                            <input class="rec-input" value="@f.Value" readonly="@f.ReadOnly"
+                                   placeholder="instance id (WID)"
+                                   @oninput="@(e => SetVal(f, e.Value?.ToString() ?? ""))" />
+                        }
+                        else if (f.Kind == "json")
+                        {
+                            <textarea class="rec-input rec-json" readonly="@f.ReadOnly" spellcheck="false"
+                                      rows="@Math.Min(10, f.Value.Split('\n').Length + 1)"
+                                      value="@f.Value"
+                                      @oninput="@(e => SetVal(f, e.Value?.ToString() ?? ""))"></textarea>
+                        }
+                        else if (f.ScalarType == "boolean")
+                        {
+                            <select class="rec-input" value="@f.Value" disabled="@f.ReadOnly"
+                                    @onchange="@(e => SetVal(f, e.Value?.ToString() ?? ""))">
+                                <option value="true">true</option>
+                                <option value="false">false</option>
+                            </select>
+                        }
+                        else
+                        {
+                            <input class="rec-input" value="@f.Value" readonly="@f.ReadOnly"
+                                   @oninput="@(e => SetVal(f, e.Value?.ToString() ?? ""))" />
+                        }
+                    </div>
+                }
+            }
+
+            @if (_phase == "done")
+            {
+                <p class="del-summary">Record updated.</p>
+                @if (!string.IsNullOrEmpty(_resultText))
+                {
+                    <pre class="rec-result">@Trunc(_resultText, 4000)</pre>
+                }
+            }
+        </div>
+
+        <div class="modal-foot">
+            @if (_phase == "edit" || _phase == "saving")
+            {
+                <span class="del-count">@Changed.Count field@(Changed.Count == 1 ? "" : "s") changed</span>
+                <button class="btn" @onclick="OnClose" disabled="@_busy">Cancel</button>
+                <button class="btn btn-primary del-go" @onclick="Save"
+                        disabled="@(_busy || Changed.Count == 0)">
+                    @(_phase == "saving" ? "Saving…" : "Save changes")
+                </button>
+            }
+            else if (_phase == "loading")
+            {
+                <button class="btn" disabled>Loading…</button>
+            }
+            else if (_phase == "done")
+            {
+                <button class="btn btn-primary" @onclick="Finish">Done</button>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string BoName { get; set; } = "";
+    [Parameter] public string Id { get; set; } = "";
+    [Parameter] public string? DataSourceId { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+    [Parameter] public EventCallback OnSaved { get; set; }
+
+    private static readonly HashSet<string> ReadOnlyKeys =
+        new() { "id", "href", "descriptor", "wid", "workdayID" };
+
+    private sealed class EditField
+    {
+        public string Key = "";
+        public string Kind = "scalar";       // scalar | reference | json
+        public string ScalarType = "string"; // string | number | boolean | null
+        public string Value = "";
+        public string Original = "";
+        public bool ReadOnly;
+    }
+
+    private string _phase = "loading"; // loading | edit | saving | done
+    private List<EditField> _fields = new();
+    private string? _error;
+    private string _resultText = "";
+
+    private bool _busy => _phase == "loading" || _phase == "saving";
+    private List<EditField> Changed => _fields.Where(f => !f.ReadOnly && f.Value != f.Original).ToList();
+
+    protected override async Task OnInitializedAsync()
+    {
+        var meta = string.IsNullOrEmpty(DataSourceId) ? null : await BoFieldsSvc.FetchByIdAsync(DataSourceId);
+
+        Dictionary<string, JsonElement> record = new();
+        var (status, body) = await Api.GetRawAsync(
+            $"/api/workday/record?boName={Uri.EscapeDataString(BoName)}&id={Uri.EscapeDataString(Id)}");
+        if (status == (int)HttpStatusCode.Unauthorized)
+        {
+            Api.RedirectToLogin();
+            return;
+        }
+        if (status < 200 || status >= 300)
+        {
+            _error = ErrorFrom(body) is { } m ? $"Couldn't load record: {m}" : $"Load failed ({status})";
+            _phase = "edit";
+            return;
+        }
+        record = ParseObject(body);
+
+        if (meta is { Count: > 0 })
+        {
+            _fields = meta.Select(f =>
+            {
+                var has = record.TryGetValue(f.Key, out var raw);
+                string value = f.Kind == "reference"
+                    ? (has && raw.ValueKind == JsonValueKind.Object ? (WqlFormat.RefId(raw) ?? "") : "")
+                    : !has || raw.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined
+                        ? ""
+                        : raw.ValueKind == JsonValueKind.Object || raw.ValueKind == JsonValueKind.Array
+                            ? JsonPretty(raw)
+                            : ScalarString(raw);
+                return new EditField
+                {
+                    Key = f.Key,
+                    Kind = f.Kind,
+                    ScalarType = f.Type,
+                    Value = value,
+                    Original = value,
+                    ReadOnly = false,
+                };
+            }).ToList();
+        }
+        else
+        {
+            _fields = ToEditFields(record);
+        }
+        _phase = "edit";
+    }
+
+    private void SetVal(EditField f, string v) => f.Value = v;
+
+    private async Task Save()
+    {
+        var body = new Dictionary<string, object?>();
+        foreach (var f in Changed)
+        {
+            if (f.Kind == "reference")
+            {
+                body[f.Key] = string.IsNullOrWhiteSpace(f.Value) ? null : new { id = f.Value.Trim() };
+            }
+            else if (f.Kind == "json")
+            {
+                try { body[f.Key] = JsonNode.Parse(f.Value); }
+                catch { _error = $"Invalid JSON in field \"{f.Key}\""; return; }
+            }
+            else
+            {
+                body[f.Key] = CoerceScalar(f.ScalarType, f.Value);
+            }
+        }
+
+        _phase = "saving";
+        _error = null;
+        try
+        {
+            var (status, text) = await Api.PostRawAsync("/api/workday/update",
+                new { boName = BoName, id = Id, body });
+            if (status == (int)HttpStatusCode.Unauthorized)
+            {
+                Api.RedirectToLogin();
+                return;
+            }
+            if (status < 200 || status >= 300)
+            {
+                var msg = ErrorFrom(text) is { } m ? $"Update failed: {m}" : $"Update failed ({status})";
+                _error = $"{msg}{(string.IsNullOrEmpty(text) ? "" : $" · {Trunc(text, 300)}")}";
+                _phase = "edit";
+                return;
+            }
+            _resultText = text;
+            _phase = "done";
+        }
+        catch (Exception e)
+        {
+            _error = e.Message;
+            _phase = "edit";
+        }
+    }
+
+    private async Task Finish()
+    {
+        await OnSaved.InvokeAsync();
+        await OnClose.InvokeAsync();
+    }
+
+    // ── helpers ──────────────────────────────────────────────────────────
+    private static List<EditField> ToEditFields(Dictionary<string, JsonElement> record)
+    {
+        var list = new List<EditField>();
+        foreach (var (key, val) in record)
+        {
+            var isObj = val.ValueKind is JsonValueKind.Object or JsonValueKind.Array;
+            var isRef = val.ValueKind == JsonValueKind.Object
+                && val.TryGetProperty("id", out var idp) && idp.ValueKind == JsonValueKind.String;
+            var value = isRef ? (WqlFormat.RefId(val) ?? "")
+                : isObj ? JsonPretty(val)
+                : val.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined ? "" : ScalarString(val);
+            var scalarType = isObj ? "string"
+                : val.ValueKind == JsonValueKind.Null ? "null"
+                : val.ValueKind == JsonValueKind.Number ? "number"
+                : val.ValueKind is JsonValueKind.True or JsonValueKind.False ? "boolean"
+                : "string";
+            list.Add(new EditField
+            {
+                Key = key,
+                Kind = isRef ? "reference" : isObj ? "json" : "scalar",
+                ScalarType = scalarType,
+                Value = value,
+                Original = value,
+                ReadOnly = ReadOnlyKeys.Contains(key),
+            });
+        }
+        return list;
+    }
+
+    private static object? CoerceScalar(string scalarType, string value)
+    {
+        if (scalarType == "number")
+            return double.TryParse(value, out var n) ? n : value;
+        if (scalarType == "boolean")
+            return value == "true" || value == "1";
+        return value;
+    }
+
+    private static string ScalarString(JsonElement v) =>
+        v.ValueKind == JsonValueKind.String ? (v.GetString() ?? "")
+        : v.ValueKind is JsonValueKind.True or JsonValueKind.False ? (v.GetBoolean() ? "true" : "false")
+        : v.GetRawText();
+
+    private static string JsonPretty(JsonElement v) =>
+        JsonSerializer.Serialize(v, new JsonSerializerOptions { WriteIndented = true });
+
+    private static Dictionary<string, JsonElement> ParseObject(string body)
+    {
+        try
+        {
+            var d = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body, ApiClient.JsonOpts);
+            return d ?? new();
+        }
+        catch { return new(); }
+    }
+
+    private static string? ErrorFrom(string body)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("error", out var e)
+                && e.ValueKind == JsonValueKind.String)
+                return e.GetString();
+        }
+        catch { }
+        return null;
+    }
+
+    private static string Trunc(string s, int n) => s.Length <= n ? s : s[..n];
+}

@@ -1,0 +1,266 @@
+@namespace ExtendExplorer.Client.Components
+@inject WqlMetadata Meta
+
+@* Business-object tree: data sources → fields, with a type glyph per field,
+   a filters/prompts entry, and per-source "use". Write modes are scoped to
+   this tenant's custom BOs. Port of components/SchemaTree.tsx. *@
+
+<aside class="tree">
+    <div class="tree-head">
+        <span class="tree-title">Business objects</span>
+        <span class="tree-count">
+            @(WriteMode ? Shown.Count.ToString() : (_sources.Count > 0 ? _sources.Count.ToString() : ""))
+        </span>
+    </div>
+    <input class="tree-filter" placeholder="Filter data sources…"
+           value="@_filter" @oninput="@(e => { _filter = e.Value?.ToString() ?? ""; })" />
+    @if (WriteMode)
+    {
+        <div class="tree-scope">
+            @(string.IsNullOrEmpty(BoCompanyId)
+                ? "Set a BO Company ID on this connection"
+                : $"Custom BOs only · {BoCompanyId}")
+        </div>
+    }
+    <div class="tree-body">
+        @if (_loading)
+        {
+            <div class="tree-msg">Loading data sources…</div>
+        }
+        @if (_error is not null)
+        {
+            <div class="tree-msg tree-err">@_error</div>
+        }
+        @if (!_loading && _error is null && Shown.Count == 0)
+        {
+            <div class="tree-msg">No data sources match “@_filter”.</div>
+        }
+        @foreach (var ds in Shown)
+        {
+            var dsFilters = _filters.TryGetValue(ds.Id, out var fl) ? fl : new();
+            var allFields = _fields.TryGetValue(ds.Id, out var ff) ? ff : new();
+            var total = _fieldTotal.TryGetValue(ds.Id, out var tt) ? tt : allFields.Count;
+            var partial = allFields.Count < total;
+            var q = _fieldFilter.Trim().ToLowerInvariant();
+            var shownFields = string.IsNullOrEmpty(q)
+                ? allFields
+                : allFields.Where(f =>
+                    f.Alias.ToLowerInvariant().Contains(q) ||
+                    f.Descriptor.ToLowerInvariant().Contains(q)).ToList();
+            <div class="ds" @key="ds.Id">
+                <div class="ds-row">
+                    <button class="ds-toggle" @onclick="@(() => Toggle(ds))" title="@ds.Descriptor">
+                        <span class="chev">@(_expanded == ds.Id ? "▾" : "▸")</span>
+                        <span class="ds-alias">@ds.Alias</span>
+                    </button>
+                    <button class="ds-use" title="Start a query from this source"
+                            @onclick="@(() => OnUseSource.InvokeAsync(ds.Alias))">
+                        use
+                    </button>
+                </div>
+                @if (_expanded == ds.Id)
+                {
+                    <div class="fields">
+                        @if (_loadingFields == ds.Id)
+                        {
+                            <div class="tree-msg tree-msg-sm">Loading fields…</div>
+                        }
+                        @if (dsFilters.Count > 0)
+                        {
+                            <button class="filters-row"
+                                    title="This source has filters/prompts — build a FROM clause"
+                                    @onclick="@(() => _dialogSource = ds)">
+                                <span class="glyph t-prompt">⚙</span>
+                                <span class="field-alias">Filters &amp; prompts (@dsFilters.Count)</span>
+                            </button>
+                        }
+                        @if (allFields.Count > 0)
+                        {
+                            <input class="field-filter"
+                                   placeholder="@(partial ? $"Filter {allFields.Count} of {total} loaded…" : $"Filter {allFields.Count} fields…")"
+                                   value="@_fieldFilter"
+                                   @oninput="@(e => { _fieldFilter = e.Value?.ToString() ?? ""; })" />
+                        }
+                        @if (partial)
+                        {
+                            <button class="field-loadall" @onclick="@(() => LoadAll(ds))"
+                                    disabled="@(_loadingMore == ds.Id)"
+                                    title="Load the remaining fields to browse and search them all">
+                                @(_loadingMore == ds.Id ? "Loading all fields…" : $"Showing {allFields.Count} of {total} — load all")
+                            </button>
+                        }
+                        @foreach (var f in shownFields)
+                        {
+                            var g = TypeGlyph(f.Type);
+                            var boDesc = f.BusinessObject?.Descriptor;
+                            <button class="field-row" @key="f.Alias"
+                                    title="@($"{f.Type} · {f.Descriptor}{(string.IsNullOrEmpty(boDesc) ? "" : $" → {boDesc}")}")"
+                                    @onclick="@(() => OnInsert.InvokeAsync(f.Alias))">
+                                <span class="glyph @g.Cls">@g.Ch</span>
+                                <span class="field-alias">@f.Alias</span>
+                            </button>
+                        }
+                        @if (allFields.Count > 0 && shownFields.Count == 0)
+                        {
+                            <div class="tree-msg tree-msg-sm">No fields match “@_fieldFilter”.</div>
+                        }
+                    </div>
+                }
+            </div>
+        }
+    </div>
+
+    @if (_dialogSource is not null)
+    {
+        <PromptDialog Source="_dialogSource"
+                      Filters="@(_filters.TryGetValue(_dialogSource.Id, out var df) ? df : new())"
+                      OnApply="OnPromptApply"
+                      OnClose="@(() => _dialogSource = null)" />
+    }
+</aside>
+
+@code {
+    [Parameter] public EventCallback<string> OnInsert { get; set; }
+    [Parameter] public EventCallback<string> OnUseSource { get; set; }
+    [Parameter] public EventCallback<string> OnApplyFromClause { get; set; }
+    [Parameter] public EventCallback<List<DataSourceDto>> OnSourcesLoaded { get; set; }
+    [Parameter] public QueryMode Mode { get; set; } = QueryMode.Select;
+    [Parameter] public string? BoCompanyId { get; set; }
+
+    private List<DataSourceDto> _sources = new();
+    private string _filter = "";
+    private bool _loading = true;
+    private string? _error;
+    private string? _expanded;
+    private const int InitialFieldLimit = 2000;
+    private readonly Dictionary<string, List<FieldDto>> _fields = new();
+    private readonly Dictionary<string, int> _fieldTotal = new();
+    private readonly Dictionary<string, List<FilterDto>> _filters = new();
+    private string? _loadingFields;
+    private string? _loadingMore;
+    private DataSourceDto? _dialogSource;
+    private string _fieldFilter = "";
+
+    private bool WriteMode => Mode != QueryMode.Select;
+
+    private List<DataSourceDto> Shown => _sources.Where(s =>
+    {
+        if (WriteMode && (string.IsNullOrEmpty(BoCompanyId) || !Wcp.IsCustomBo(s.Alias, BoCompanyId)))
+            return false;
+        return string.IsNullOrEmpty(_filter)
+            || s.Alias.ToLowerInvariant().Contains(_filter.ToLowerInvariant())
+            || s.Descriptor.ToLowerInvariant().Contains(_filter.ToLowerInvariant());
+    }).ToList();
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _sources = await Meta.FetchDataSourcesAsync();
+            await OnSourcesLoaded.InvokeAsync(_sources); // hand the alias→WID map up to Explorer
+        }
+        catch (RedirectingToLoginException) { /* navigating away */ }
+        catch (Exception e)
+        {
+            _error = e.Message;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task Toggle(DataSourceDto ds)
+    {
+        _fieldFilter = ""; // fresh field search whenever we open/switch sources
+        if (_expanded == ds.Id)
+        {
+            _expanded = null;
+            return;
+        }
+        _expanded = ds.Id;
+        if (!_fields.ContainsKey(ds.Id))
+        {
+            _loadingFields = ds.Id;
+            // Fields and filters load together — a prompted source needs both.
+            var fieldsTask = SafeFetchFields(ds.Id);
+            var filtersTask = SafeFetchFilters(ds.Id);
+            await Task.WhenAll(fieldsTask, filtersTask);
+            _loadingFields = null;
+        }
+    }
+
+    // Load the first batch of fields fast (huge BOs can have thousands); the
+    // rest come via "Load all". Prime the completion cache only once the full
+    // set is in.
+    private async Task SafeFetchFields(string id)
+    {
+        try
+        {
+            var (got, total) = await Meta.FetchFieldsPageAsync(id, 0, InitialFieldLimit);
+            var sorted = got.OrderBy(f => f.Alias, StringComparer.Ordinal).ToList();
+            _fields[id] = sorted;
+            _fieldTotal[id] = total;
+            if (sorted.Count >= total) await Meta.PrimeFieldsAsync(id, sorted);
+        }
+        catch (RedirectingToLoginException) { }
+        catch (Exception e)
+        {
+            _error = e.Message;
+        }
+    }
+
+    // Pull the remaining fields for a partially-loaded source, then prime the
+    // completion cache with the full, sorted set.
+    private async Task LoadAll(DataSourceDto ds)
+    {
+        var have = _fields.TryGetValue(ds.Id, out var ff) ? ff : new();
+        var total = _fieldTotal.TryGetValue(ds.Id, out var tt) ? tt : have.Count;
+        if (have.Count >= total || _loadingMore == ds.Id) return;
+        _loadingMore = ds.Id;
+        try
+        {
+            var (rest, _) = await Meta.FetchFieldsPageAsync(ds.Id, have.Count, null);
+            var merged = have.Concat(rest).OrderBy(f => f.Alias, StringComparer.Ordinal).ToList();
+            _fields[ds.Id] = merged;
+            await Meta.PrimeFieldsAsync(ds.Id, merged);
+        }
+        catch (RedirectingToLoginException) { }
+        catch (Exception e)
+        {
+            _error = e.Message;
+        }
+        finally
+        {
+            _loadingMore = null;
+        }
+    }
+
+    private async Task SafeFetchFilters(string id)
+    {
+        // A failed filters fetch is non-fatal — the source may simply not
+        // expose the dataSourceFilters endpoint; fields still work.
+        try
+        {
+            _filters[id] = await Meta.FetchFiltersAsync(id);
+        }
+        catch { /* ignore */ }
+    }
+
+    private async Task OnPromptApply(string clause)
+    {
+        await OnApplyFromClause.InvokeAsync(clause);
+        _dialogSource = null;
+    }
+
+    // Single-letter glyph + colour per field type — the tree's signature.
+    private static (string Ch, string Cls) TypeGlyph(string type) => type switch
+    {
+        "Single Instance" => ("→", "t-ref"),
+        "Multi Instance" => ("⋮", "t-multi"),
+        "Numeric" or "Currency" => ("#", "t-num"),
+        "Date" => ("◷", "t-date"),
+        "Boolean" => ("◩", "t-bool"),
+        _ => ("T", "t-text"),
+    };
+}

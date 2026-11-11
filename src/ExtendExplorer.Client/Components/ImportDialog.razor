@@ -1,0 +1,463 @@
+@namespace ExtendExplorer.Client.Components
+@inject ApiClient Api
+@inject BoFields BoFieldsSvc
+@using System.Net
+@using System.Text.Json.Nodes
+
+@* Load rows from a JSON file written by Export and create them in the chosen
+   custom BO. Records are sanitised first: Workday-managed fields are dropped and
+   references are reduced to { id }, so a file exported from this tool imports
+   cleanly. Inserts go through the same bulk endpoint as Bulk insert. *@
+
+<div class="modal-overlay">
+    <div class="modal modal-wide modal-xl" @onclick:stopPropagation="true">
+        <div class="modal-head">
+            <div>
+                <div class="modal-title">@(_phase == "done" ? "Import result" : "Import rows from file")</div>
+                <div class="modal-sub">@BoName</div>
+            </div>
+            @if (_phase != "running")
+            {
+                <button class="modal-x" @onclick="OnClose">×</button>
+            }
+        </div>
+
+        <div class="modal-body rec-body">
+            @if (_error is not null)
+            {
+                <div class="connect-error" style="white-space:pre-wrap">@_error</div>
+            }
+
+            @if (_phase == "edit")
+            {
+                <p class="bulk-hint">
+                    Choose a JSON file previously written by <strong>Export all rows</strong> (a JSON array of
+                    records). Rows are created as <em>new</em> instances — this restores data, it doesn't
+                    overwrite existing rows.
+                </p>
+
+                <div class="rec-field">
+                    <label class="rec-key">File</label>
+                    <label class="btn" style="cursor:pointer;margin:0;align-self:flex-start">
+                        → Choose JSON file
+                        <InputFile OnChange="OnPickFile" accept=".json,application/json" style="display:none" />
+                    </label>
+                </div>
+
+                @if (_fileName is not null)
+                {
+                    <div class="note-inline">
+                        <strong>@_fileName</strong> — @_records.Count row@(_records.Count == 1 ? "" : "s") ready.
+                        <br />
+                        <strong>Sending @_columns.Count field@(_columns.Count == 1 ? "" : "s"):</strong>
+                        <code>@string.Join(", ", _columns.Take(14))</code>@(_columns.Count > 14 ? "…" : "")
+                        @if (_systemDropped.Count > 0)
+                        {
+                            <br />
+                            <text>Skipped — Workday sets these itself: <code>@string.Join(", ", _systemDropped.Take(10))</code>@(_systemDropped.Count > 10 ? "…" : "").</text>
+                        }
+                        @if (_notWritable.Count > 0)
+                        {
+                            <br />
+                            <span class="bulk-warn">
+                                Skipped — not writable fields on <code>@BoName</code>:
+                                <code>@string.Join(", ", _notWritable.Take(10))</code>@(_notWritable.Count > 10 ? "…" : "").
+                                If you expected these to import, check you picked the matching file for this business object.
+                            </span>
+                        }
+                    </div>
+
+                    @if (_records.Count > 0)
+                    {
+                        <div class="bulk-preview-wrap">
+                            <table class="bulk-preview">
+                                <thead>
+                                    <tr>
+                                        <th>#</th>
+                                        @foreach (var h in PreviewCols)
+                                        {
+                                            <th @key="h">@h</th>
+                                        }
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @for (var i = 0; i < Math.Min(PreviewRows, _records.Count); i++)
+                                    {
+                                        var rec = _records[i];
+                                        <tr @key="i">
+                                            <td>@(i + 1)</td>
+                                            @foreach (var h in PreviewCols)
+                                            {
+                                                <td @key="h">@CellText(rec, h)</td>
+                                            }
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                        @if (_records.Count > PreviewRows)
+                        {
+                            <p class="bulk-hint">…and @(_records.Count - PreviewRows) more.</p>
+                        }
+                    }
+                }
+            }
+
+            @if (_phase == "running")
+            {
+                <p class="del-warn">Importing… @_progress/@_records.Count row@(_records.Count == 1 ? "" : "s").</p>
+                @ResultList
+            }
+
+            @if (_phase == "done")
+            {
+                <p class="del-summary">@OkCount imported@(FailCount > 0 ? $", {FailCount} failed" : "").</p>
+                @ResultList
+            }
+        </div>
+
+        <div class="modal-foot">
+            @if (_phase == "edit")
+            {
+                <button class="btn" @onclick="OnClose">Cancel</button>
+                <button class="btn btn-primary del-go" @onclick="Import" disabled="@(_records.Count == 0)">
+                    Import @(_records.Count > 0 ? _records.Count.ToString() : "") row@(_records.Count == 1 ? "" : "s")
+                </button>
+            }
+            else if (_phase == "running")
+            {
+                <button class="btn" disabled>Importing…</button>
+            }
+            else
+            {
+                <button class="btn btn-primary" @onclick="Finish">Done</button>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string BoName { get; set; } = "";
+    [Parameter] public string? DataSourceId { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+    [Parameter] public EventCallback OnImported { get; set; }
+
+    private const int ChunkSize = 100;
+    private const int MaxRows = 2000;
+    private const int PreviewRows = 5;
+
+    // Workday-managed: present in an export for reference, never settable.
+    private static readonly HashSet<string> SystemKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "id", "href", "descriptor", "wid", "workdayID", "createdMoment", "updatedMoment",
+        "classOfInstance1", "referenceID1", "lastFunctionallyUpdated",
+        "currentOMSVersion", "standardWorkdayID", "_links",
+    };
+
+    private sealed class RowResult
+    {
+        public int Index;
+        public bool Ok;
+        public int Status;
+        public string? Id;
+        public string? Error;
+    }
+
+    private string _phase = "edit"; // edit | running | done
+    private string? _error;
+    private string? _fileName;
+    private List<JsonObject> _records = new();
+    private List<string> _columns = new();
+    private readonly List<string> _systemDropped = new();
+    private readonly List<string> _notWritable = new();
+    private readonly List<RowResult> _results = new();
+    private int _progress;
+    private List<BoFieldDto> _meta = new();
+
+    private List<string> PreviewCols => _columns.Take(8).ToList();
+    private int OkCount => _results.Count(r => r.Ok);
+    private int FailCount => _results.Count - OkCount;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!string.IsNullOrEmpty(DataSourceId))
+            _meta = await BoFieldsSvc.FetchByIdAsync(DataSourceId) ?? new();
+    }
+
+    private async Task OnPickFile(InputFileChangeEventArgs e)
+    {
+        _error = null;
+        _records = new();
+        _columns = new();
+        _systemDropped.Clear();
+        _notWritable.Clear();
+
+        var file = e.File;
+        if (file is null) return;
+        _fileName = file.Name;
+
+        try
+        {
+            using var stream = file.OpenReadStream(32 * 1024 * 1024); // 32 MB cap
+            using var reader = new StreamReader(stream);
+            var text = await reader.ReadToEndAsync();
+            Parse(text);
+        }
+        catch (Exception ex)
+        {
+            _error = $"Couldn't read the file: {ex.Message}";
+            _fileName = null;
+        }
+    }
+
+    private void Parse(string text)
+    {
+        using var doc = JsonDocument.Parse(text);
+        var root = doc.RootElement;
+
+        // Accept a bare array, or an object wrapping one (e.g. { "data": [ … ] }).
+        JsonElement arr;
+        if (root.ValueKind == JsonValueKind.Array) arr = root;
+        else if (root.ValueKind == JsonValueKind.Object
+                 && root.TryGetProperty("data", out var d) && d.ValueKind == JsonValueKind.Array) arr = d;
+        else
+        {
+            _error = "That file isn't a JSON array of records.";
+            return;
+        }
+
+        // The BO's own field metadata is the allow-list when we have it: it
+        // already excludes Workday-managed fields AND the BO's self-reference
+        // (a field named after the object whose id is the row's workdayID),
+        // which a fixed name list can't know about. Without metadata we fall
+        // back to dropping the well-known system keys plus anything that looks
+        // like a self-reference.
+        var writable = new Dictionary<string, BoFieldDto>(StringComparer.OrdinalIgnoreCase);
+        foreach (var m in _meta) writable[m.Key] = m;
+        var haveMeta = writable.Count > 0;
+
+        var systemDropped = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var notWritable = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var cols = new List<string>();
+        var seenCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var item in arr.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object) continue;
+
+            // This row's own instance id, so a self-reference can be spotted
+            // even without metadata.
+            var selfId = Str(item, "workdayID") ?? Str(item, "standardWorkdayID");
+
+            var rec = new JsonObject();
+            foreach (var p in item.EnumerateObject())
+            {
+                if (SystemKeys.Contains(p.Name)) { systemDropped.Add(p.Name); continue; }
+
+                if (haveMeta)
+                {
+                    if (!writable.ContainsKey(p.Name))
+                    {
+                        // The BO's own self-reference is Workday-managed rather
+                        // than a mismatch, so report it as such.
+                        if (IsSelfReference(p.Value, selfId)) systemDropped.Add(p.Name);
+                        else notWritable.Add(p.Name);
+                        continue;
+                    }
+                }
+                else if (IsSelfReference(p.Value, selfId))
+                {
+                    systemDropped.Add(p.Name);
+                    continue;
+                }
+
+                var node = Sanitize(p.Value);
+                if (node is null) continue;
+
+                // Export writes numbers as strings; send them back as the type
+                // the field expects so Workday doesn't reject them.
+                if (haveMeta) node = Coerce(node, writable[p.Name]);
+
+                rec[p.Name] = node;
+                if (seenCols.Add(p.Name)) cols.Add(p.Name);
+            }
+            if (rec.Count > 0) _records.Add(rec);
+            if (_records.Count >= MaxRows) break;
+        }
+
+        _columns = cols;
+        _systemDropped.AddRange(systemDropped);
+        _notWritable.AddRange(notWritable);
+
+        if (_records.Count == 0)
+            _error = haveMeta
+                ? "No writable fields found in that file for this business object — check you picked the right file."
+                : "No importable records found in that file.";
+    }
+
+    private static string? Str(JsonElement obj, string name) =>
+        obj.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    // A reference back to the row itself (the BO's self-reference field): an
+    // object whose id matches this record's own workdayID.
+    private static bool IsSelfReference(JsonElement v, string? selfId) =>
+        !string.IsNullOrEmpty(selfId)
+        && v.ValueKind == JsonValueKind.Object
+        && v.TryGetProperty("id", out var id)
+        && id.ValueKind == JsonValueKind.String
+        && id.GetString() == selfId;
+
+    // "91000.75" → 91000.75, "true" → true, for fields the schema says are
+    // numeric/boolean. Anything that doesn't parse is left as-is.
+    private static JsonNode? Coerce(JsonNode node, BoFieldDto field)
+    {
+        if (node is not JsonValue jv || !jv.TryGetValue<string>(out var s)) return node;
+        if (field.Type == "number"
+            && double.TryParse(s, System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture, out var n))
+            return JsonValue.Create(n);
+        if (field.Type == "boolean" && bool.TryParse(s, out var b))
+            return JsonValue.Create(b);
+        return node;
+    }
+
+    // Reduce an exported value to what the API will accept: references become
+    // { id }, empties are dropped, everything else passes through.
+    private static JsonNode? Sanitize(JsonElement v)
+    {
+        switch (v.ValueKind)
+        {
+            case JsonValueKind.Object:
+                if (v.TryGetProperty("id", out var idp) && idp.ValueKind == JsonValueKind.String)
+                {
+                    var id = idp.GetString();
+                    return string.IsNullOrEmpty(id) ? null : new JsonObject { ["id"] = id };
+                }
+                return JsonNode.Parse(v.GetRawText());
+            case JsonValueKind.Array:
+                var arr = new JsonArray();
+                foreach (var item in v.EnumerateArray())
+                {
+                    var n = Sanitize(item);
+                    if (n is not null) arr.Add(n);
+                }
+                return arr.Count > 0 ? arr : null;
+            case JsonValueKind.String:
+                var s = v.GetString();
+                return string.IsNullOrEmpty(s) ? null : JsonValue.Create(s);
+            case JsonValueKind.Null:
+            case JsonValueKind.Undefined:
+                return null;
+            default:
+                return JsonNode.Parse(v.GetRawText());
+        }
+    }
+
+    private async Task Import()
+    {
+        _phase = "running";
+        _error = null;
+        _results.Clear();
+        _progress = 0;
+
+        for (var start = 0; start < _records.Count; start += ChunkSize)
+        {
+            var chunk = _records.Skip(start).Take(ChunkSize).ToList();
+            try
+            {
+                var (status, body) = await Api.PostRawAsync("/api/workday/insert-bulk",
+                    new { boName = BoName, records = chunk });
+                if (status == (int)HttpStatusCode.Unauthorized) { Api.RedirectToLogin(); return; }
+
+                if (status < 200 || status >= 300)
+                {
+                    var msg = ErrorFrom(body) ?? status.ToString();
+                    for (var i = 0; i < chunk.Count; i++)
+                        _results.Add(new RowResult { Index = start + i, Ok = false, Status = status, Error = msg });
+                }
+                else
+                {
+                    var data = Deserialize<InsertBulkResponse>(body);
+                    foreach (var r in data?.Results ?? new())
+                        _results.Add(new RowResult
+                        {
+                            Index = start + r.Index,
+                            Ok = r.Ok,
+                            Status = r.Status,
+                            Id = r.Id,
+                            Error = r.Error,
+                        });
+                }
+            }
+            catch (Exception e)
+            {
+                for (var i = 0; i < chunk.Count; i++)
+                    _results.Add(new RowResult { Index = start + i, Ok = false, Status = 0, Error = e.Message });
+            }
+            _progress = Math.Min(start + ChunkSize, _records.Count);
+            StateHasChanged();
+        }
+
+        _phase = "done";
+    }
+
+    private async Task Finish()
+    {
+        await OnImported.InvokeAsync();
+        await OnClose.InvokeAsync();
+    }
+
+    private RenderFragment ResultList => builder =>
+    {
+        builder.OpenElement(0, "div");
+        builder.AddAttribute(1, "class", "del-idlist");
+        var seq = 2;
+        foreach (var r in _results)
+        {
+            builder.OpenElement(seq, "div");
+            builder.SetKey(r.Index);
+            builder.AddAttribute(seq + 1, "class", $"del-result{(r.Ok ? " ok" : " fail")}");
+            builder.OpenElement(seq + 2, "span");
+            builder.AddAttribute(seq + 3, "class", "del-result-id");
+            builder.AddContent(seq + 4, $"Row {r.Index + 1}{(r.Ok && !string.IsNullOrEmpty(r.Id) ? $" · {r.Id}" : "")}");
+            builder.CloseElement();
+            builder.OpenElement(seq + 5, "span");
+            builder.AddAttribute(seq + 6, "class", "del-result-status");
+            builder.AddContent(seq + 7, r.Ok
+                ? "created"
+                : $"{(r.Status != 0 ? r.Status.ToString() : "error")}{(string.IsNullOrEmpty(r.Error) ? "" : $" · {r.Error}")}");
+            builder.CloseElement();
+            builder.CloseElement();
+            seq += 10;
+        }
+        builder.CloseElement();
+    };
+
+    private static string CellText(JsonObject rec, string key)
+    {
+        if (!rec.TryGetPropertyValue(key, out var node) || node is null) return "";
+        if (node is JsonObject o && o.TryGetPropertyValue("id", out var id)) return id?.ToString() ?? "";
+        if (node is JsonArray a) return $"{a.Count} item{(a.Count == 1 ? "" : "s")}";
+        return node.ToString();
+    }
+
+    private static T? Deserialize<T>(string body)
+    {
+        try { return JsonSerializer.Deserialize<T>(body, ApiClient.JsonOpts); }
+        catch { return default; }
+    }
+
+    private static string? ErrorFrom(string body)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("error", out var e)
+                && e.ValueKind == JsonValueKind.String)
+                return e.GetString();
+        }
+        catch { }
+        return null;
+    }
+}

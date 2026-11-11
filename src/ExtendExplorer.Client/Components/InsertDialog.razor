@@ -1,0 +1,407 @@
+@namespace ExtendExplorer.Client.Components
+@inject ApiClient Api
+@inject BoFields BoFieldsSvc
+@using System.Net
+@using System.Text.Json.Nodes
+@using System.Text.RegularExpressions
+
+@* Create a new custom-BO record (optionally cloned from a row). Empty fields
+   are omitted; Workday's read-only/derived rejections (code A13) are dropped
+   and the insert retried. Port of components/InsertDialog.tsx. *@
+
+<div class="modal-overlay">
+    <div class="modal modal-wide" @onclick:stopPropagation="true">
+        <div class="modal-head">
+            <div>
+                <div class="modal-title">
+                    @(_phase == "done" ? "Insert result" : (CloneFromId is not null ? "Clone record" : "New record"))
+                </div>
+                <div class="modal-sub">@BoName</div>
+            </div>
+            @if (!_busy)
+            {
+                <button class="modal-x" @onclick="OnClose">×</button>
+            }
+        </div>
+
+        <div class="modal-body rec-body">
+            @if (_phase == "loading")
+            {
+                <p class="del-warn">Loading fields…</p>
+            }
+            @if (_error is not null)
+            {
+                <div class="connect-error" style="white-space:pre-wrap">@_error</div>
+            }
+
+            @if (_phase == "edit" || _phase == "saving")
+            {
+                <p class="del-warn">
+                    @(CloneFromId is not null
+                        ? "Prefilled from the source row — system fields (id, dates) are reset. Edit as needed, then create a new record."
+                        : "Fill the fields to set on the new record. Empty fields are omitted (Workday applies defaults / required-field rules).")
+                </p>
+                @if (!string.IsNullOrEmpty(_metaNote))
+                {
+                    <p class="del-warn" style="color:var(--amber)">@_metaNote</p>
+                }
+                @foreach (var f in _fields)
+                {
+                    <div class="rec-field" @key="f.Key">
+                        <label class="rec-key">
+                            @f.Key
+                            @if (f.Kind == "reference")
+                            {
+                                <span class="rec-ro"> id</span>
+                            }
+                            @if (f.Kind == "json")
+                            {
+                                <span class="rec-ro"> object/array</span>
+                            }
+                        </label>
+                        @if (f.Kind == "reference")
+                        {
+                            <input class="rec-input" value="@f.Value" placeholder="instance id (WID)"
+                                   @oninput="@(e => f.Value = e.Value?.ToString() ?? "")" />
+                        }
+                        else if (f.Kind == "json")
+                        {
+                            <textarea class="rec-input rec-json" placeholder='{ "id": "…" }' spellcheck="false"
+                                      rows="3" value="@f.Value"
+                                      @oninput="@(e => f.Value = e.Value?.ToString() ?? "")"></textarea>
+                        }
+                        else if (f.Type == "boolean")
+                        {
+                            <select class="rec-input" value="@f.Value"
+                                    @onchange="@(e => f.Value = e.Value?.ToString() ?? "")">
+                                <option value="">(unset)</option>
+                                <option value="true">true</option>
+                                <option value="false">false</option>
+                            </select>
+                        }
+                        else
+                        {
+                            <input class="rec-input" type="@(f.Type == "number" ? "number" : "text")"
+                                   value="@f.Value"
+                                   @oninput="@(e => f.Value = e.Value?.ToString() ?? "")" />
+                        }
+                    </div>
+                }
+            }
+
+            @if (_phase == "done")
+            {
+                <p class="del-summary">Record created.</p>
+                @if (!string.IsNullOrEmpty(_droppedNote))
+                {
+                    <p class="del-warn">@_droppedNote</p>
+                }
+                @if (!string.IsNullOrEmpty(_resultText))
+                {
+                    <pre class="rec-result">@Trunc(_resultText, 4000)</pre>
+                }
+            }
+        </div>
+
+        <div class="modal-foot">
+            @if (_phase == "edit" || _phase == "saving")
+            {
+                <button class="btn" @onclick="OnClose" disabled="@_busy">Cancel</button>
+                <button class="btn btn-primary del-go" @onclick="Save" disabled="@_busy">
+                    @(_phase == "saving" ? "Creating…" : "Create record")
+                </button>
+            }
+            else if (_phase == "loading")
+            {
+                <button class="btn" disabled>Loading…</button>
+            }
+            else if (_phase == "done")
+            {
+                <button class="btn btn-primary" @onclick="Finish">Done</button>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string BoName { get; set; } = "";
+    [Parameter] public List<string> Columns { get; set; } = new();
+    [Parameter] public string? CloneFromId { get; set; }
+    [Parameter] public string? DataSourceId { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+    [Parameter] public EventCallback OnInserted { get; set; }
+
+    private static readonly HashSet<string> SystemKeys = new()
+    {
+        "id", "href", "descriptor", "wid", "workdayID", "createdMoment", "updatedMoment",
+        "classOfInstance1", "referenceID1", "lastFunctionallyUpdated",
+        "currentOMSVersion", "standardWorkdayID", "_links",
+    };
+
+    private sealed class Field
+    {
+        public string Key = "";
+        public string Kind = "scalar"; // scalar | reference | json
+        public string Type = "string"; // string | number | boolean
+        public string Value = "";
+    }
+
+    private sealed class ValErr
+    {
+        public string? Field;
+        public string Message = "";
+        public string? Code;
+    }
+
+    private string _phase = "loading"; // loading | edit | saving | done
+    private List<Field> _fields = new();
+    private string? _error;
+    private string _resultText = "";
+    private string _droppedNote = "";
+    private string _metaNote = "";
+
+    private bool _busy => _phase == "loading" || _phase == "saving";
+
+    protected override async Task OnInitializedAsync()
+    {
+        var prefill = CloneFromId != null;
+        var meta = string.IsNullOrEmpty(DataSourceId) ? null : await BoFieldsSvc.FetchByIdAsync(DataSourceId);
+
+        var valueMap = new Dictionary<string, JsonElement>();
+        if (CloneFromId is not null)
+        {
+            var (status, body) = await Api.GetRawAsync(
+                $"/api/workday/record?boName={Uri.EscapeDataString(BoName)}&id={Uri.EscapeDataString(CloneFromId)}");
+            if (status == (int)HttpStatusCode.Unauthorized)
+            {
+                Api.RedirectToLogin();
+                return;
+            }
+            if (status is >= 200 and < 300)
+            {
+                try
+                {
+                    var parsed = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body, ApiClient.JsonOpts);
+                    if (parsed is not null) valueMap = parsed;
+                }
+                catch { /* prefill is best-effort */ }
+            }
+        }
+
+        // Union field sources: schema metadata (authoritative for types, and it
+        // already excludes system/generated fields) when present; otherwise
+        // discover fields from the source row + selected columns and infer types.
+        var metaByKey = (meta ?? new()).ToDictionary(f => f.Key, f => f);
+        var orderedKeys = new List<string>();
+        var seen = new HashSet<string>();
+        void Add(string k)
+        {
+            if (string.IsNullOrEmpty(k) || seen.Contains(k) || SystemKeys.Contains(k)) return;
+            seen.Add(k);
+            orderedKeys.Add(k);
+        }
+        if (metaByKey.Count > 0)
+        {
+            foreach (var f in meta!) Add(f.Key);
+        }
+        else
+        {
+            foreach (var k in valueMap.Keys) Add(k);
+            foreach (var c in Columns) Add(c);
+        }
+
+        _fields = orderedKeys.Select(k =>
+        {
+            var m = metaByKey.GetValueOrDefault(k);
+            JsonElement? raw = valueMap.TryGetValue(k, out var rv) ? rv : null;
+            var kind = m?.Kind ?? InferKind(raw);
+            var type = m?.Type ?? InferType(raw);
+            return new Field
+            {
+                Key = k,
+                Kind = kind,
+                Type = type,
+                Value = prefill ? FormatValue(raw, kind) : "",
+            };
+        }).ToList();
+
+        _metaNote = meta is { Count: > 0 }
+            ? ""
+            : "Schema metadata unavailable — field list and types inferred from the source row.";
+        _phase = "edit";
+    }
+
+    private async Task Save()
+    {
+        _droppedNote = "";
+        var record = new Dictionary<string, object?>();
+        foreach (var f in _fields)
+        {
+            if (string.IsNullOrWhiteSpace(f.Value)) continue;
+            if (f.Kind == "reference")
+            {
+                record[f.Key] = new { id = f.Value.Trim() };
+            }
+            else if (f.Kind == "json")
+            {
+                try { record[f.Key] = JsonNode.Parse(f.Value); }
+                catch { _error = $"Invalid JSON in field \"{f.Key}\""; return; }
+            }
+            else
+            {
+                record[f.Key] = CoerceScalar(f.Type, f.Value);
+            }
+        }
+
+        if (record.Count == 0) { _error = "Fill at least one field."; return; }
+        await Submit(record, new List<string>(), 0);
+    }
+
+    // POST the record; if Workday rejects read-only/derived fields, drop them
+    // from the payload (and the form) and retry (up to 4 attempts).
+    private async Task Submit(Dictionary<string, object?> record, List<string> dropped, int attempt)
+    {
+        _phase = "saving";
+        _error = null;
+        try
+        {
+            var (status, text) = await Api.PostRawAsync("/api/workday/insert",
+                new { boName = BoName, record });
+            if (status == (int)HttpStatusCode.Unauthorized)
+            {
+                Api.RedirectToLogin();
+                return;
+            }
+            if (status is >= 200 and < 300)
+            {
+                _resultText = text;
+                if (dropped.Count > 0)
+                    _droppedNote = $"Read-only fields not sent: {string.Join(", ", dropped)}.";
+                _phase = "done";
+                return;
+            }
+
+            var errs = ParseErrors(text);
+            var readOnly = errs.Where(IsReadOnly)
+                .Select(e => e.Field)
+                .Where(f => !string.IsNullOrEmpty(f))
+                .Select(f => f!)
+                .ToList();
+            if (readOnly.Count > 0 && attempt < 4)
+            {
+                foreach (var f in readOnly) record.Remove(f);
+                _fields = _fields.Where(f => !readOnly.Contains(f.Key)).ToList();
+                var allDropped = dropped.Concat(readOnly).Distinct().ToList();
+                if (record.Count == 0)
+                {
+                    _error = $"Every field was read-only: {string.Join(", ", allDropped)}.";
+                    _phase = "edit";
+                    return;
+                }
+                await Submit(record, allDropped, attempt + 1);
+                return;
+            }
+
+            var lines = errs.Count > 0
+                ? errs.Select(e => $"{(string.IsNullOrEmpty(e.Field) ? "" : $"{e.Field}: ")}{e.Message}")
+                : new[] { Trunc(text, 400) };
+            var note = dropped.Count > 0 ? $"\n(dropped read-only: {string.Join(", ", dropped)})" : "";
+            _error = $"Insert failed ({status})\n{string.Join("\n", lines)}{note}";
+            _phase = "edit";
+        }
+        catch (Exception e)
+        {
+            _error = e.Message;
+            _phase = "edit";
+        }
+    }
+
+    private async Task Finish()
+    {
+        await OnInserted.InvokeAsync();
+        await OnClose.InvokeAsync();
+    }
+
+    // ── helpers ──────────────────────────────────────────────────────────
+    private static List<ValErr> ParseErrors(string text)
+    {
+        var list = new List<ValErr>();
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("errors", out var errs)
+                && errs.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var e in errs.EnumerateArray())
+                {
+                    string? field = e.TryGetProperty("field", out var fp) && fp.ValueKind == JsonValueKind.String
+                        ? fp.GetString()
+                        : e.TryGetProperty("path", out var pp) && pp.ValueKind == JsonValueKind.String
+                            ? pp.GetString()
+                            : null;
+                    var message = e.TryGetProperty("error", out var mp) && mp.ValueKind == JsonValueKind.String
+                        ? mp.GetString() ?? "error"
+                        : "error";
+                    var code = e.TryGetProperty("code", out var cp) && cp.ValueKind == JsonValueKind.String
+                        ? cp.GetString()
+                        : null;
+                    list.Add(new ValErr { Field = field, Message = message, Code = code });
+                }
+            }
+        }
+        catch { /* not JSON */ }
+        return list;
+    }
+
+    // Derived / read-only fields (e.g. amountRange) come back with code A13.
+    private static bool IsReadOnly(ValErr e) =>
+        e.Code == "A13" || Regex.IsMatch(e.Message, "read.?only", RegexOptions.IgnoreCase);
+
+    // Format a source value for prefill: reference → its id, object → JSON,
+    // else stringified.
+    private static string FormatValue(JsonElement? raw, string kind)
+    {
+        if (raw is not JsonElement v || v.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+            return "";
+        if (kind == "reference")
+            return v.ValueKind == JsonValueKind.Object ? (WqlFormat.RefId(v) ?? "") : ScalarString(v);
+        if (v.ValueKind is JsonValueKind.Object or JsonValueKind.Array)
+            return JsonSerializer.Serialize(v, new JsonSerializerOptions { WriteIndented = true });
+        return ScalarString(v);
+    }
+
+    // Infer an input kind/type from a source value when schema metadata doesn't
+    // cover the field (cloning with metadata unavailable). References arrive as
+    // { id, descriptor }, multi-instance as arrays, booleans/numbers as-is.
+    private static string InferKind(JsonElement? raw)
+    {
+        if (raw is not JsonElement v) return "scalar";
+        if (v.ValueKind == JsonValueKind.Array) return "json";
+        if (v.ValueKind == JsonValueKind.Object)
+            return v.TryGetProperty("id", out _) ? "reference" : "json";
+        return "scalar";
+    }
+
+    private static string InferType(JsonElement? raw)
+    {
+        if (raw is not JsonElement v) return "string";
+        if (v.ValueKind is JsonValueKind.True or JsonValueKind.False) return "boolean";
+        if (v.ValueKind == JsonValueKind.Number) return "number";
+        return "string";
+    }
+
+    private static string ScalarString(JsonElement v) =>
+        v.ValueKind == JsonValueKind.String ? (v.GetString() ?? "")
+        : v.ValueKind is JsonValueKind.True or JsonValueKind.False ? (v.GetBoolean() ? "true" : "false")
+        : v.GetRawText();
+
+    private static object? CoerceScalar(string type, string value)
+    {
+        if (type == "number") return double.TryParse(value, out var n) ? n : value;
+        if (type == "boolean") return value == "true";
+        return value;
+    }
+
+    private static string Trunc(string s, int n) => s.Length <= n ? s : s[..n];
+}

@@ -1,0 +1,18 @@
+@namespace ExtendExplorer.Client
+
+@* Root router. Pages render bare (no shared layout) — the Explorer and Connect
+   screens own their full-viewport chrome, exactly like the original Next.js app
+   where page.tsx was the whole surface. *@
+<Router AppAssembly="@typeof(App).Assembly">
+    <Found Context="routeData">
+        <RouteView RouteData="@routeData" />
+        <FocusOnNavigate RouteData="@routeData" Selector="body" />
+    </Found>
+    <NotFound>
+        <PageTitle>Not found</PageTitle>
+        <div style="padding:2rem;font-family:system-ui;color:#e6edf3;background:#0d1117;min-height:100vh">
+            <h1 style="font-size:1.1rem">Page not found</h1>
+            <p><a href="/" style="color:#58a6ff">Back to Extend Explorer</a></p>
+        </div>
+    </NotFound>
+</Router>

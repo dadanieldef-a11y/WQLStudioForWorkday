@@ -1,0 +1,88 @@
+@namespace ExtendExplorer.Client.Components
+
+@* The strip above the results grid that carries the current mode's actions:
+   Delete (Delete selected + Delete all rows the query matches), Update (match count +
+   Bulk edit), Insert
+   (Bulk insert + New record) and Export/Import (Import rows + Export all rows).
+   Pure presentation — Explorer decides which mode is active and whether it
+   applies (custom BO, results loaded) and owns every dialog these open. *@
+
+@switch (Active)
+{
+    case QueryMode.Delete:
+        <div class="delete-bar">
+            <span class="del-count">@SelectedCount selected</span>
+            @if (BulkError is not null)
+            {
+                <span class="bulk-err">@BulkError</span>
+            }
+            <button class="btn btn-danger del-go" disabled="@(SelectedCount == 0)"
+                    @onclick="OnDelete">
+                Delete @(SelectedCount > 0 ? SelectedCount.ToString() : "") selected
+            </button>
+            <button class="btn btn-danger del-go" disabled="@(RowsLoaded == 0 || BulkLoading)"
+                    title="Delete every row this query matches (all pages)"
+                    @onclick="OnDeleteAll">
+                @(BulkLoading ? "Collecting…" : $"Delete all {MatchCount:N0}")
+            </button>
+        </div>
+        break;
+
+    case QueryMode.Update:
+        <div class="update-bar">
+            <span class="del-count">
+                @(Total is long tt ? $"{tt:N0} row{(tt == 1 ? "" : "s")} match" : $"{RowsLoaded} loaded")
+            </span>
+            @if (BulkError is not null)
+            {
+                <span class="bulk-err">@BulkError</span>
+            }
+            <button class="btn btn-primary del-go" disabled="@BulkLoading" @onclick="OnBulkEdit">
+                @(BulkLoading ? "Collecting…" : "Bulk edit")
+            </button>
+        </div>
+        break;
+
+    case QueryMode.Insert:
+        <div class="update-bar">
+            <span class="del-count">@Source</span>
+            <button class="btn del-go" @onclick="OnBulkInsert">⇪ Bulk insert</button>
+            <button class="btn btn-primary del-go" @onclick="OnNewRecord">+ New record</button>
+        </div>
+        break;
+
+    case QueryMode.Export:
+        <div class="update-bar">
+            <span class="del-count">
+                @Source
+                @(Total is long et ? $" · {et:N0} row{(et == 1 ? "" : "s")}" : "")
+            </span>
+            <button class="btn del-go" @onclick="OnImport">⤒ Import rows</button>
+            <button class="btn btn-primary del-go" @onclick="OnExport">⤓ Export all rows</button>
+        </div>
+        break;
+}
+
+@code {
+    // The mode whose bar to show, or null for none (Select mode, or the mode
+    // doesn't apply to the current results).
+    [Parameter] public QueryMode? Active { get; set; }
+
+    [Parameter] public string? Source { get; set; }
+    [Parameter] public long? Total { get; set; }
+    [Parameter] public int RowsLoaded { get; set; }
+    [Parameter] public int SelectedCount { get; set; }
+    [Parameter] public bool BulkLoading { get; set; }
+    [Parameter] public string? BulkError { get; set; }
+
+    // Rows the query matches across all pages (falls back to the page count).
+    private long MatchCount => Total ?? RowsLoaded;
+
+    [Parameter] public EventCallback OnDelete { get; set; }
+    [Parameter] public EventCallback OnDeleteAll { get; set; }
+    [Parameter] public EventCallback OnBulkEdit { get; set; }
+    [Parameter] public EventCallback OnBulkInsert { get; set; }
+    [Parameter] public EventCallback OnNewRecord { get; set; }
+    [Parameter] public EventCallback OnImport { get; set; }
+    [Parameter] public EventCallback OnExport { get; set; }
+}

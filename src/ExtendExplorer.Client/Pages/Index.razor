@@ -1,0 +1,66 @@
+@page "/"
+@namespace ExtendExplorer.Client.Pages
+@inject ApiClient Api
+@using System.Text.Json
+
+@* Client-side auth gate. Tenant connections live in the browser, so the server
+   can't redirect to login — the gate checks the session and renders either the
+   Connect screen or the Explorer. Returning from OAuth lands back at "/", this
+   re-checks, and the Explorer mounts. Port of components/AppGate.tsx +
+   app/page.tsx. *@
+
+<PageTitle>WQL Studio — WQL workbench</PageTitle>
+
+@if (_loading)
+{
+    <div class="boot">Loading…</div>
+}
+else if (!_authenticated)
+{
+    <ConnectScreen />
+}
+else
+{
+    <Explorer Tenant="@_tenant" BoCompanyId="@_boCompanyId" OnSignOut="SignOut" />
+}
+
+@code {
+    private bool _loading = true;
+    private bool _authenticated;
+    private string? _tenant;
+    private string? _boCompanyId;
+
+    protected override async Task OnInitializedAsync() => await Check();
+
+    private async Task Check()
+    {
+        try
+        {
+            var (_, body) = await Api.GetRawAsync("/api/auth/session");
+            var j = JsonSerializer.Deserialize<SessionStatus>(body, ApiClient.JsonOpts);
+            _authenticated = j?.Authenticated ?? false;
+            _tenant = j?.Tenant;
+            _boCompanyId = j?.BoCompanyId;
+        }
+        catch
+        {
+            _authenticated = false;
+            _tenant = null;
+            _boCompanyId = null;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task SignOut()
+    {
+        try { await Api.PostRawAsync("/api/auth/logout", new { }); }
+        catch { /* drop our copy regardless */ }
+        _authenticated = false;
+        _tenant = null;
+        _boCompanyId = null;
+        StateHasChanged();
+    }
+}

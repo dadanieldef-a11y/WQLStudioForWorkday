@@ -1,0 +1,293 @@
+@namespace ExtendExplorer.Client.Components
+@inject ApiClient Api
+@inject BoFields BoFieldsSvc
+@using System.Net
+@using System.Text.Json.Nodes
+
+@* Set one field to one value across many matched rows, sent to the WCP bulk
+   endpoint in batches of 100. Port of components/BulkUpdateDialog.tsx. *@
+
+<div class="modal-overlay">
+    <div class="modal modal-wide" @onclick:stopPropagation="true">
+        <div class="modal-head">
+            <div>
+                <div class="modal-title">@(_phase == "done" ? "Bulk update result" : "Bulk edit records")</div>
+                <div class="modal-sub">@BoName · @Ids.Count row@(Ids.Count == 1 ? "" : "s")</div>
+            </div>
+            @if (!_busy)
+            {
+                <button class="modal-x" @onclick="OnClose">×</button>
+            }
+        </div>
+
+        <div class="modal-body rec-body">
+            @if (_phase == "loading")
+            {
+                <p class="del-warn">Loading fields…</p>
+            }
+            @if (_error is not null)
+            {
+                <div class="connect-error">@_error</div>
+            }
+
+            @if (_phase == "edit" || _phase == "running")
+            {
+                <div class="rec-field">
+                    <label class="rec-key">Field</label>
+                    <select class="rec-input" value="@_field" disabled="@_busy"
+                            @onchange="@(e => OnPickField(e.Value?.ToString() ?? ""))">
+                        <option value="">Select a field…</option>
+                        @foreach (var f in _fieldOpts)
+                        {
+                            <option value="@f.Key" selected="@(f.Key == _field)">
+                                @f.Key (@(f.Kind == "reference" ? "id" : f.Kind == "json" ? "object" : f.Type))
+                            </option>
+                        }
+                    </select>
+                </div>
+
+                @if (CurrentOpt is not null)
+                {
+                    <div class="rec-field">
+                        <label class="rec-key">Value</label>
+                        @if (CurrentOpt.Kind == "reference")
+                        {
+                            <input class="rec-input" value="@_value" disabled="@_busy"
+                                   placeholder="instance id (WID)"
+                                   @oninput="@(e => _value = e.Value?.ToString() ?? "")" />
+                        }
+                        else if (CurrentOpt.Kind == "json")
+                        {
+                            <textarea class="rec-input rec-json" disabled="@_busy" spellcheck="false"
+                                      rows="@Math.Min(10, _value.Split('\n').Length + 1)"
+                                      value="@_value"
+                                      @oninput="@(e => _value = e.Value?.ToString() ?? "")"></textarea>
+                        }
+                        else if (CurrentOpt.Type == "boolean")
+                        {
+                            <select class="rec-input" value="@_value" disabled="@_busy"
+                                    @onchange="@(e => _value = e.Value?.ToString() ?? "")">
+                                <option value="true">true</option>
+                                <option value="false">false</option>
+                            </select>
+                        }
+                        else
+                        {
+                            <input class="rec-input" type="@(CurrentOpt.Type == "number" ? "number" : "text")"
+                                   value="@_value" disabled="@_busy"
+                                   @oninput="@(e => _value = e.Value?.ToString() ?? "")" />
+                        }
+                    </div>
+                }
+
+                <p class="del-warn">
+                    Updates @Ids.Count record@(Ids.Count == 1 ? "" : "s") with <code>@BodyPreview</code>
+                    via the bulk endpoint@(BatchCount > 1 ? $" ({BatchCount} batches of {BatchSize})" : "").
+                </p>
+                <div class="del-idlist">
+                    @foreach (var id in Ids)
+                    {
+                        <div class="del-id" @key="id">@id</div>
+                    }
+                </div>
+            }
+
+            @if (_phase == "done")
+            {
+                <p class="del-summary">@_okRows updated@(_failRows > 0 ? $", {_failRows} failed" : "").</p>
+                <div class="del-idlist">
+                    @foreach (var b in _batches)
+                    {
+                        <div class="del-result@(b.Ok ? " ok" : " fail")" @key="b.Index">
+                            <span class="del-result-id">Batch @(b.Index + 1) · @b.Count row@(b.Count == 1 ? "" : "s")</span>
+                            <span class="del-result-status">
+                                @(b.Ok ? "updated" : $"{(b.Status != 0 ? b.Status.ToString() : "error")}{(string.IsNullOrEmpty(b.Error) ? "" : $" · {b.Error}")}")
+                            </span>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+
+        <div class="modal-foot">
+            @if (_phase == "edit" || _phase == "running")
+            {
+                <button class="btn" @onclick="OnClose" disabled="@_busy">Cancel</button>
+                <button class="btn btn-primary del-go" @onclick="Apply" disabled="@(_busy || string.IsNullOrEmpty(_field))">
+                    @(_phase == "running" ? "Applying…" : $"Apply to {Ids.Count} row{(Ids.Count == 1 ? "" : "s")}")
+                </button>
+            }
+            else if (_phase == "loading")
+            {
+                <button class="btn" disabled>Loading…</button>
+            }
+            else if (_phase == "done")
+            {
+                <button class="btn btn-primary" @onclick="Finish">Done</button>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string BoName { get; set; } = "";
+    [Parameter] public List<string> Ids { get; set; } = new();
+    [Parameter] public List<string> Columns { get; set; } = new();
+    [Parameter] public string? DataSourceId { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+    [Parameter] public EventCallback OnDone { get; set; }
+
+    private const int BatchSize = 100;
+
+    private sealed class FieldOpt
+    {
+        public string Key = "";
+        public string Kind = "scalar"; // scalar | reference | json
+        public string Type = "string"; // string | number | boolean
+    }
+
+    private string _phase = "loading"; // loading | edit | running | done
+    private List<FieldOpt> _fieldOpts = new();
+    private string _field = "";
+    private string _value = "";
+    private string? _error;
+    private List<BatchResultRow> _batches = new();
+    private int _okRows;
+    private int _failRows;
+
+    private bool _busy => _phase == "loading" || _phase == "running";
+    private int BatchCount => (int)Math.Ceiling(Ids.Count / (double)BatchSize);
+    private FieldOpt? CurrentOpt => _fieldOpts.FirstOrDefault(f => f.Key == _field);
+
+    protected override async Task OnInitializedAsync()
+    {
+        var meta = string.IsNullOrEmpty(DataSourceId) ? null : await BoFieldsSvc.FetchByIdAsync(DataSourceId);
+        if (meta is { Count: > 0 })
+        {
+            _fieldOpts = meta.Select(f => new FieldOpt { Key = f.Key, Kind = f.Kind, Type = f.Type }).ToList();
+        }
+        else
+        {
+            _fieldOpts = Columns
+                .Where(c => !string.Equals(c, "workdayID", StringComparison.OrdinalIgnoreCase))
+                .Select(c => new FieldOpt { Key = c, Kind = "scalar", Type = "string" })
+                .ToList();
+        }
+        _phase = "edit";
+    }
+
+    private void OnPickField(string k)
+    {
+        _field = k;
+        var opt = _fieldOpts.FirstOrDefault(f => f.Key == k);
+        if (opt is null) { _value = ""; return; }
+        _value = opt.Kind == "scalar" && opt.Type == "boolean" ? "true" : "";
+    }
+
+    private string BodyPreview
+    {
+        get
+        {
+            var opt = CurrentOpt;
+            if (opt is null) return "{ … }";
+            object? v;
+            if (opt.Kind == "reference") v = new { id = _value };
+            else if (opt.Kind == "json")
+            {
+                try { v = JsonNode.Parse(_value); }
+                catch { return "(invalid JSON)"; }
+            }
+            else v = CoerceScalar(opt.Type, _value);
+            try
+            {
+                var node = new JsonObject { [_field] = v is JsonNode jn ? jn : JsonValue.Create(v) };
+                return node.ToJsonString();
+            }
+            catch { return "{ … }"; }
+        }
+    }
+
+    private async Task Apply()
+    {
+        var opt = CurrentOpt;
+        if (opt is null) return;
+        object? fieldValue;
+        if (opt.Kind == "reference")
+        {
+            if (string.IsNullOrWhiteSpace(_value)) { _error = $"Enter an id for \"{_field}\""; return; }
+            fieldValue = new { id = _value.Trim() };
+        }
+        else if (opt.Kind == "json")
+        {
+            try { fieldValue = JsonNode.Parse(_value); }
+            catch { _error = $"Invalid JSON for \"{_field}\""; return; }
+        }
+        else
+        {
+            fieldValue = CoerceScalar(opt.Type, _value);
+        }
+
+        _phase = "running";
+        _error = null;
+        try
+        {
+            var body = new Dictionary<string, object?> { [_field] = fieldValue };
+            var (status, text) = await Api.PostRawAsync("/api/workday/update-bulk",
+                new { boName = BoName, ids = Ids, body });
+            if (status == (int)HttpStatusCode.Unauthorized)
+            {
+                Api.RedirectToLogin();
+                return;
+            }
+            if (status < 200 || status >= 300)
+            {
+                _error = $"Update failed: {ErrorFrom(text) ?? status.ToString()}";
+                _phase = "edit";
+                return;
+            }
+            var data = Deserialize<BulkUpdateResponse>(text);
+            _batches = data?.Batches ?? new();
+            _okRows = data?.OkRows ?? 0;
+            _failRows = data?.FailRows ?? 0;
+            _phase = "done";
+        }
+        catch (Exception e)
+        {
+            _error = e.Message;
+            _phase = "edit";
+        }
+    }
+
+    private async Task Finish()
+    {
+        await OnDone.InvokeAsync();
+        await OnClose.InvokeAsync();
+    }
+
+    private static object? CoerceScalar(string type, string value)
+    {
+        if (type == "number") return double.TryParse(value, out var n) ? n : value;
+        if (type == "boolean") return value == "true";
+        return value;
+    }
+
+    private static T? Deserialize<T>(string body)
+    {
+        try { return JsonSerializer.Deserialize<T>(body, ApiClient.JsonOpts); }
+        catch { return default; }
+    }
+
+    private static string? ErrorFrom(string body)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("error", out var e)
+                && e.ValueKind == JsonValueKind.String)
+                return e.GetString();
+        }
+        catch { }
+        return null;
+    }
+}

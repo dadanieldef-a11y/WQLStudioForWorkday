@@ -1,0 +1,213 @@
+@namespace ExtendExplorer.Client.Components
+@inject Connections Store
+@inject Interop Interop
+
+@* Toad-style connection manager: list of saved tenants + an inline editor.
+   Writes straight to browser localStorage via the Connections service;
+   OnChange lets the parent re-read the active connection after any mutation.
+   Port of components/ConnectionsManager.tsx. *@
+
+<div class="conn-mgr">
+    <div class="conn-list">
+        @if (_connections.Count == 0)
+        {
+            <div class="conn-empty">No tenants saved yet — add one below to connect.</div>
+        }
+        @foreach (var c in _connections)
+        {
+            <div class="conn-row@(c.Id == _activeId ? " active" : "")" @key="c.Id">
+                <button class="conn-pick" @onclick="@(() => MakeActive(c.Id))" title="Make active">
+                    <span class="conn-dot" aria-hidden="true"></span>
+                    <span class="conn-name">@c.Name</span>
+                    <span class="conn-host">@HostOf(c.WqlBase)</span>
+                </button>
+                <div class="conn-actions">
+                    <button @onclick="@(() => Edit(c))">Edit</button>
+                    <button @onclick="@(() => Duplicate(c.Id))">Duplicate</button>
+                    <button class="danger" @onclick="@(() => Remove(c.Id))">Delete</button>
+                </div>
+            </div>
+        }
+    </div>
+
+    @if (_draft is not null)
+    {
+        <div class="conn-form">
+            <div class="conn-form-title">@(string.IsNullOrEmpty(_draft.Id) ? "New connection" : "Edit connection")</div>
+            <div class="conn-form-req">All fields are required.</div>
+            <label>Name <span class="conn-req">*</span>
+                <input required value="@_draft.Name" @oninput="@(e => _draft.Name = e.Value?.ToString() ?? "")" placeholder="Acme — Sandbox" />
+            </label>
+            <label>Authorize endpoint <span class="conn-req">*</span>
+                <input required value="@_draft.AuthorizeEndpoint" @oninput="@(e => _draft.AuthorizeEndpoint = e.Value?.ToString() ?? "")" placeholder="https://…/authorize" />
+            </label>
+            <label>Token endpoint <span class="conn-req">*</span>
+                <input required value="@_draft.TokenEndpoint" @oninput="@(e => _draft.TokenEndpoint = e.Value?.ToString() ?? "")" placeholder="https://…/token" />
+            </label>
+            <label>WQL base <span class="conn-req">*</span>
+                <input required value="@_draft.WqlBase" @oninput="@(e => _draft.WqlBase = e.Value?.ToString() ?? "")" placeholder="https://…/ccx/api/wql/v1/{tenant}" />
+            </label>
+            <label>Client ID <span class="conn-req">*</span>
+                <input required value="@_draft.ClientId" @oninput="@(e => _draft.ClientId = e.Value?.ToString() ?? "")" placeholder="Client id" />
+            </label>
+            <label>Client secret <span class="conn-req">*</span>
+                <input required type="password" value="@_draft.ClientSecret" @oninput="@(e => _draft.ClientSecret = e.Value?.ToString() ?? "")" placeholder="Client secret" />
+            </label>
+            <label>Tenant alias <span class="conn-req">*</span>
+                <input required value="@_draft.TenantAlias" @oninput="@(e => _draft.TenantAlias = e.Value?.ToString() ?? "")" placeholder="acme_wcpdev1" />
+            </label>
+            <label>BO Company ID <span class="conn-req">*</span>
+                <input required value="@_draft.BoCompanyId" @oninput="@(e => _draft.BoCompanyId = e.Value?.ToString() ?? "")" placeholder="abcdef" />
+                <span class="conn-hint">
+                    The short code Workday puts in your custom business object names.
+                    In <code>acmequerytool_abcdef_loanApplications</code> it's <code>abcdef</code>.
+                    It's how the app tells your custom BOs from delivered ones, so it's required
+                    for Insert, Update, Delete and Export/Import.
+                </span>
+            </label>
+            <label>App API base <span class="conn-req">*</span>
+                <input required value="@_draft.ApiBase" @oninput="@(e => _draft.ApiBase = e.Value?.ToString() ?? "")" placeholder="https://api.us.wcp.workday.com" />
+            </label>
+            <div class="conn-form-actions">
+                <button class="btn primary" @onclick="Save" disabled="@(!CanSave)">Save</button>
+                <button class="btn" @onclick="@(() => _draft = null)">Cancel</button>
+            </div>
+        </div>
+    }
+    else
+    {
+        <button class="btn conn-add" @onclick="@(() => _draft = new Connection())">+ Add connection</button>
+    }
+
+    <div class="conn-io" style="display:flex;gap:8px;margin-top:10px">
+        <button class="btn" @onclick="Export" disabled="@(_connections.Count == 0)">↓ Export settings</button>
+        <label class="btn" style="cursor:pointer;margin:0">
+            → Import settings
+            <InputFile OnChange="OnImportFile" accept=".json,application/json" style="display:none" />
+        </label>
+    </div>
+    <div class="conn-io-note" style="margin-top:6px;font-size:11.5px;color:var(--text-dim,#8b949e)">
+        The settings file contains each connection's client secret in plain text — keep it somewhere safe.
+    </div>
+    @if (_ioStatus is not null)
+    {
+        <div class="conn-io-status" style="margin-top:6px;font-size:12px;color:var(--text-dim,#8b949e)">@_ioStatus</div>
+    }
+</div>
+
+@code {
+    [Parameter] public EventCallback OnChange { get; set; }
+
+    private List<Connection> _connections = new();
+    private string? _activeId;
+    private Connection? _draft; // null = not editing
+    private string? _ioStatus;  // last export/import result line
+
+    private bool CanSave =>
+        _draft is not null
+        && !string.IsNullOrWhiteSpace(_draft.Name)
+        && !string.IsNullOrWhiteSpace(_draft.AuthorizeEndpoint)
+        && !string.IsNullOrWhiteSpace(_draft.TokenEndpoint)
+        && !string.IsNullOrWhiteSpace(_draft.WqlBase)
+        && !string.IsNullOrWhiteSpace(_draft.ClientId)
+        && !string.IsNullOrWhiteSpace(_draft.ClientSecret)
+        && !string.IsNullOrWhiteSpace(_draft.TenantAlias)
+        && !string.IsNullOrWhiteSpace(_draft.BoCompanyId)
+        && !string.IsNullOrWhiteSpace(_draft.ApiBase);
+
+    protected override Task OnInitializedAsync() => Reload();
+
+    private async Task Reload()
+    {
+        _connections = await Store.ListAsync();
+        _activeId = await Store.GetActiveIdAsync();
+    }
+
+    private async Task Refresh()
+    {
+        await Reload();
+        await OnChange.InvokeAsync();
+        StateHasChanged();
+    }
+
+    private async Task MakeActive(string id)
+    {
+        await Store.SetActiveIdAsync(id);
+        await Refresh();
+    }
+
+    private void Edit(Connection c) => _draft = c.Clone();
+
+    private async Task Duplicate(string id)
+    {
+        await Store.DuplicateAsync(id);
+        await Refresh();
+    }
+
+    private async Task Save()
+    {
+        if (_draft is null || !CanSave) return;
+        var trimmed = _draft.Clone();
+        trimmed.Name = _draft.Name.Trim();
+        trimmed.AuthorizeEndpoint = _draft.AuthorizeEndpoint.Trim();
+        trimmed.TokenEndpoint = _draft.TokenEndpoint.Trim();
+        trimmed.WqlBase = _draft.WqlBase.Trim();
+        trimmed.ClientId = _draft.ClientId.Trim();
+        trimmed.ClientSecret = _draft.ClientSecret.Trim();
+        trimmed.TenantAlias = _draft.TenantAlias.Trim();
+        trimmed.BoCompanyId = _draft.BoCompanyId.Trim();
+        trimmed.ApiBase = _draft.ApiBase.Trim();
+        await Store.SaveAsync(trimmed);
+        _draft = null;
+        await Refresh();
+    }
+
+    private async Task Remove(string id)
+    {
+        if (!await Interop.ConfirmAsync("Delete this connection?")) return;
+        await Store.DeleteAsync(id);
+        if (_draft?.Id == id) _draft = null;
+        await Refresh();
+    }
+
+    private async Task Export()
+    {
+        _ioStatus = null;
+        try
+        {
+            var json = await Store.ExportJsonAsync();
+            var stamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH-mm-ss");
+            await Interop.DownloadJsonAsync($"extend-explorer-connections-{stamp}.json", json);
+        }
+        catch (Exception ex)
+        {
+            _ioStatus = $"Export failed: {ex.Message}";
+        }
+    }
+
+    private async Task OnImportFile(InputFileChangeEventArgs e)
+    {
+        _ioStatus = null;
+        var file = e.File;
+        if (file is null) return;
+        try
+        {
+            using var stream = file.OpenReadStream(5 * 1024 * 1024); // 5 MB cap
+            using var reader = new StreamReader(stream);
+            var text = await reader.ReadToEndAsync();
+            var (imported, saved) = await Store.ImportJsonAsync(text);
+            _ioStatus = $"Imported {imported} connection{(imported == 1 ? "" : "s")} — {saved} saved.";
+            await Refresh();
+        }
+        catch (Exception ex)
+        {
+            _ioStatus = $"Import failed: {ex.Message}";
+        }
+    }
+
+    private static string HostOf(string url)
+    {
+        try { return new Uri(url).Host; }
+        catch { return ""; }
+    }
+}

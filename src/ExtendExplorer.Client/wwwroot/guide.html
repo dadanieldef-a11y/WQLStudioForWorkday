@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WQL Studio, User Guide</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="icon" href="wqlstudio-icon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="wqlstudio-icon-32x32.png" />
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #12171e;
+      --surface-2: #161c24;
+      --border: #26313f;
+      --text: #dbe3ec;
+      --text-dim: #8a97a8;
+      --accent: #4aa8ff;
+      --accent-2: #6cb4ff;
+      --amber: #f0a862;
+      --green: #7fd39b;
+      --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+      --sans: 'Inter', system-ui, -apple-system, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 15px;
+      line-height: 1.65;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, kbd {
+      font-family: var(--mono);
+      font-size: 0.86em;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 5px;
+      /* JetBrains Mono ligates >= and <= into ≥ / ≤; show the operators as typed */
+      font-variant-ligatures: none;
+      font-feature-settings: "liga" 0, "clig" 0, "calt" 0;
+    }
+    kbd { color: var(--accent-2); }
+    pre {
+      background: #10151c;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      overflow-x: auto;
+      font-family: var(--mono);
+      font-size: 13px;
+      line-height: 1.55;
+      font-variant-ligatures: none;
+      font-feature-settings: "liga" 0, "clig" 0, "calt" 0;
+    }
+    pre code { background: none; border: none; padding: 0; }
+
+    /* Layout */
+    .layout { display: flex; min-height: 100vh; }
+    .sidebar {
+      width: 264px;
+      flex: 0 0 264px;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+      padding: 22px 16px 40px;
+    }
+    .brand { display: flex; align-items: baseline; gap: 8px; padding: 0 8px 18px; }
+    .brand-mark { color: var(--accent); font-size: 20px; }
+    .brand-name { font-weight: 700; font-size: 16px; }
+    .brand-sub { color: var(--text-dim); font-size: 11px; font-family: var(--mono); }
+    .brand-logo { align-self: center; display: block; border-radius: 5px; }
+    .nav-group-title {
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.09em;
+      padding: 16px 10px 6px;
+      border-top: 1px solid var(--border);
+      margin-top: 8px;
+    }
+    .nav a {
+      display: block;
+      color: var(--text);
+      padding: 7px 10px;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      border-left: 2px solid transparent;
+    }
+    .nav a:hover { color: var(--accent-2); background: var(--surface-2); text-decoration: none; }
+    .nav a.active {
+      color: var(--accent-2);
+      background: var(--surface-2);
+      border-left-color: var(--accent);
+      font-weight: 700;
+    }
+    .nav a.sub { padding-left: 22px; font-size: 13px; }
+
+    .content {
+      flex: 1 1 auto;
+      max-width: 860px;
+      padding: 40px 48px 120px;
+      margin: 0 auto;
+    }
+    section { padding-top: 24px; margin-bottom: 40px; scroll-margin-top: 20px; }
+    section > h2 {
+      font-size: 26px;
+      margin: 0 0 4px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    section h3 { font-size: 18px; margin: 30px 0 8px; color: var(--accent-2); }
+    section h4 { font-size: 15px; margin: 20px 0 6px; }
+    p { margin: 10px 0; }
+    ul, ol { padding-left: 22px; }
+    li { margin: 6px 0; }
+    .lead { color: var(--text-dim); font-size: 16px; }
+    .hero-title { font-size: 34px; font-weight: 700; margin: 0 0 6px; }
+
+    .note, .tip, .warn {
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin: 16px 0;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      font-size: 14px;
+    }
+    .note { border-left: 3px solid var(--accent); }
+    .tip { border-left: 3px solid var(--green); }
+    .warn { border-left: 3px solid var(--amber); }
+    .note strong, .tip strong, .warn strong { color: var(--text); }
+
+    /* Screenshots */
+    figure.shot {
+      margin: 20px 0;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      background: var(--surface);
+    }
+    figure.shot img { display: block; width: 100%; height: auto; cursor: zoom-in; }
+
+    /* Click-to-zoom overlay */
+    .lightbox {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 40px 24px 56px;
+      background: rgba(4, 7, 11, 0.93);
+      cursor: zoom-out;
+    }
+    .lightbox.open { display: flex; }
+    .lightbox img {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.65);
+    }
+    .lightbox-cap {
+      position: absolute;
+      left: 24px;
+      right: 24px;
+      bottom: 18px;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 13px;
+    }
+    .lightbox-close {
+      position: absolute;
+      top: 10px;
+      right: 18px;
+      background: none;
+      border: none;
+      color: var(--text-dim);
+      font-size: 28px;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .lightbox-close:hover { color: var(--text); }
+    figure.shot figcaption {
+      padding: 9px 14px;
+      color: var(--text-dim);
+      font-size: 13px;
+      border-top: 1px solid var(--border);
+      background: var(--surface-2);
+    }
+    figure.shot.pending {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 190px;
+      border-style: dashed;
+      text-align: center;
+      padding: 24px;
+      color: var(--text-dim);
+    }
+    figure.shot.pending .ph-title { color: var(--text); font-weight: 600; margin-bottom: 4px; }
+    figure.shot.pending code { font-size: 12px; }
+
+    .kbd-row { margin: 8px 0; }
+    .field-table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
+    .field-table th, .field-table td {
+      text-align: left;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    .field-table th { color: var(--text-dim); font-weight: 600; background: var(--surface); }
+    .field-table td code { white-space: nowrap; }
+    .pill {
+      display: inline-block;
+      font-family: var(--mono);
+      font-size: 11px;
+      padding: 1px 7px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      color: var(--accent-2);
+    }
+    .topbar-mobile { display: none; }
+    @media (max-width: 820px) {
+      .sidebar { position: fixed; z-index: 20; transform: translateX(-100%); transition: transform .2s ease; }
+      .sidebar.open { transform: translateX(0); }
+      .content { padding: 24px 20px 100px; }
+      .topbar-mobile {
+        display: flex; align-items: center; gap: 12px;
+        position: sticky; top: 0; z-index: 10;
+        background: var(--surface); border-bottom: 1px solid var(--border);
+        padding: 10px 16px;
+      }
+      .topbar-mobile button {
+        background: var(--surface-2); border: 1px solid var(--border); color: var(--text);
+        border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 14px;
+      }
+    }
+
+    /* ── Print / "Save as PDF": a clean, light, paginated document ────── */
+    @media print {
+      :root {
+        --bg: #ffffff;
+        --surface: #ffffff;
+        --surface-2: #f3f5f8;
+        --border: #cfd7e0;
+        --text: #1b2530;
+        --text-dim: #55606f;
+        --accent: #1f6feb;
+        --accent-2: #1550a8;
+      }
+      html, body { background: #fff; color: var(--text); }
+      body {
+        font-size: 10.5pt; line-height: 1.5;
+        -webkit-print-color-adjust: exact; print-color-adjust: exact;
+      }
+      .topbar-mobile, .sidebar { display: none !important; }
+      .layout { display: block; }
+      .content { max-width: none; margin: 0; padding: 0; }
+      a { color: var(--accent); text-decoration: none; }
+      code, kbd { background: var(--surface-2); border: 1px solid var(--border); color: var(--text); }
+      kbd { color: var(--accent-2); }
+      pre { background: var(--surface-2); border: 1px solid var(--border); }
+      pre code { background: none; border: none; }
+      .hero-title { font-size: 24pt; }
+      .hero-title img { width: 26px !important; height: 26px !important; }
+      .lead { color: var(--text-dim); }
+      section { break-before: page; padding-top: 0; margin-bottom: 16px; }
+      #overview { break-before: avoid; }
+      section > h2 { border-bottom: 1px solid var(--border); color: var(--text); }
+      section h3 { color: var(--accent-2); }
+      h2, h3 { break-after: avoid; }
+      figure.shot { break-inside: avoid; border: 1px solid var(--border); background: #fff; }
+      figure.shot img { width: auto; max-width: 100%; max-height: 7.6in; display: block; margin: 0 auto; cursor: default; }
+      .lightbox { display: none !important; }
+      figure.shot figcaption { background: var(--surface-2); color: var(--text-dim); border-top: 1px solid var(--border); }
+      .note, .tip, .warn { background: var(--surface-2); border: 1px solid var(--border); break-inside: avoid; }
+      .note { border-left: 3px solid var(--accent); }
+      .tip { border-left: 3px solid #2e9e5b; }
+      .warn { border-left: 3px solid #c9821f; }
+      .note strong, .tip strong, .warn strong { color: var(--text); }
+      .field-table th { background: var(--surface-2); color: var(--text-dim); }
+      .field-table th, .field-table td { border-bottom: 1px solid var(--border); }
+      .pill { border: 1px solid var(--border); background: var(--surface-2); color: var(--accent-2); }
+      @page { margin: 14mm 15mm 16mm; }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar-mobile">
+    <button id="menuBtn" aria-label="Toggle navigation">☰ Contents</button>
+    <span class="brand-name">WQL Studio Guide</span>
+  </div>
+
+  <div class="layout">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <img class="brand-logo" src="wqlstudio-icon-64x64.png" alt="" width="22" height="22" />
+        <span class="brand-name">WQL Studio</span>
+        <span class="brand-sub">user guide</span>
+      </div>
+      <nav class="nav">
+        <a href="#overview">Overview</a>
+        <div class="nav-group-title">Getting started</div>
+        <a href="#login">Login &amp; setup</a>
+        <a href="#explorer">The Explorer</a>
+        <div class="nav-group-title">Reading data</div>
+        <a href="#select">Select (query)</a>
+        <div class="nav-group-title">Changing data</div>
+        <a href="#insert">Insert</a>
+        <a href="#update">Update</a>
+        <a href="#delete">Delete</a>
+        <div class="nav-group-title">Backup</div>
+        <a href="#export-import">Export / Import</a>
+        <a href="#backup-restore">Backup &amp; restore walkthrough</a>
+        <div class="nav-group-title">Reference</div>
+        <a href="#shortcuts">Keyboard &amp; tips</a>
+        <a href="#limits">Limits at a glance</a>
+        <a href="#troubleshooting">Troubleshooting</a>
+        <a href="#wql-cookbook">WQL cookbook</a>
+      </nav>
+    </aside>
+
+    <main class="content">
+      <section id="overview">
+        <p class="hero-title"><img src="wqlstudio-icon-64x64.png" alt="" width="30" height="30" style="vertical-align:-6px;border-radius:6px;margin-right:6px" />WQL Studio</p>
+        <p class="lead">A WQL workbench for Workday Extend, browse business objects, run WQL, drill into references, and insert / update / delete records on your custom business objects.</p>
+        <p>WQL Studio is a “Toad for Workday Extend”: a fast way to explore the data model and work with data through the Workday Query Language (WQL) and the Extend API. This guide walks through connecting a tenant and using each mode.</p>
+        <div class="note">
+          <strong>Two kinds of work.</strong> <strong>Select</strong> queries <em>any</em> business object (read-only). <strong>Insert / Update / Delete</strong> and <strong>Export/Import</strong> work only on your tenant’s <em>custom</em> business objects, the ones whose name carries your <code>BO Company ID</code> marker.
+        </div>
+      </section>
+
+      <section id="login">
+        <h2>Login &amp; setup</h2>
+        <p>WQL Studio signs in to a Workday tenant using OAuth <strong>Authorization Code + PKCE</strong> against an API client registered on that tenant. Your tenant connections are stored locally in your browser; the access token is held server-side and never exposed to the page.</p>
+
+        <h3>1. Before you start, register an API client</h3>
+        <p>In the Workday <strong>Developer Site</strong>, go to <strong>API Clients</strong> and create one for the tenant you want to query.</p>
+        <figure class="shot" data-src="guide/api-client-create.png" data-cap="Creating the API client on the Workday Developer Site, note the Redirect URI."></figure>
+        <table class="field-table">
+          <thead><tr><th>Field</th><th>What to enter</th></tr></thead>
+          <tbody>
+            <tr><td><code>Name</code></td><td>Anything recognisable, e.g. “Acme WQL”.</td></tr>
+            <tr><td><code>Scopes</code></td><td>The functional areas you intend to query. Include <strong>Workday Extend</strong> so your custom business objects are reachable; add others (Personal Data, Staffing, Core Compensation…) as your use requires. You can only query what the client is scoped for.</td></tr>
+            <tr><td><code>Redirect URI</code></td><td>Exactly <code>http://localhost:3000/api/auth/callback</code>.</td></tr>
+            <tr><td><code>Authorized CORS Domains</code></td><td>Required by the form. Set per your organisation's security guidance.</td></tr>
+          </tbody>
+        </table>
+        <div class="warn"><strong>The redirect URI must match exactly, including the port.</strong> WQL Studio always runs on <code>localhost:3000</code> so this one registered URI works for everyone, on their own machine. If something else is already using port 3000, the app won't be reachable there and login will fail.</div>
+        <p>After saving, Workday shows the client's <strong>Client ID</strong> and <strong>Client Secret</strong>. Keep them handy, they go straight into the connection form in the next step.</p>
+        <div class="note"><strong>Missing a field later?</strong> If a query returns nothing you expect, or a business object isn't listed, the API client's <em>scopes</em> are the usual cause, you can edit them on the same page.</div>
+
+        <h3>2. Add a connection</h3>
+        <p>On the Connect screen, choose <strong>+ Add connection</strong> and fill in the tenant details.</p>
+        <figure class="shot" data-src="guide/login-connect-screen.png" data-cap="The Connect screen, add, edit, and choose a tenant connection."></figure>
+        <figure class="shot" data-src="guide/login-connection-form.png" data-cap="The connection form. All nine fields are required."></figure>
+        <table class="field-table">
+          <thead><tr><th>Field</th><th>What it is</th></tr></thead>
+          <tbody>
+            <tr><td><code>Name</code></td><td>A label for this tenant (e.g. “Acme WCP Dev1”).</td></tr>
+            <tr><td><code>Authorize endpoint</code></td><td>The tenant’s OAuth authorize URL.</td></tr>
+            <tr><td><code>Token endpoint</code></td><td>The tenant’s OAuth token URL.</td></tr>
+            <tr><td><code>WQL base</code></td><td>The WQL API base, e.g. <code>https://…/wql/v1</code>.</td></tr>
+            <tr><td><code>Client ID</code></td><td>The API client’s ID.</td></tr>
+            <tr><td><code>Client secret</code></td><td>The API client’s secret.</td></tr>
+            <tr><td><code>Tenant alias</code></td><td>The tenant short name (e.g. <code>acme_wcpdev1</code>).</td></tr>
+            <tr><td><code>BO Company ID</code></td><td>The marker that identifies <em>your</em> custom BOs, required to enable Insert/Update/Delete and Export/Import. Example, acmequerytool_<em>abcdef</em>_loanApplications</td></tr>
+            <tr><td><code>App API base</code></td><td>The WCP Extend App API base, e.g. <code>https://api.us.wcp.workday.com</code>.</td></tr>
+          </tbody>
+        </table>
+
+        <h3>3. Connect</h3>
+        <p>Select the connection so it’s active, then click <strong>Connect to &lt;name&gt;</strong>. You’ll be sent to Workday to sign in, then returned to the app authenticated.</p>
+
+        <h3>Managing connections</h3>
+        <p>Each saved connection has three actions:</p>
+        <ul>
+          <li><strong>Edit</strong>, opens the same form, prefilled. <strong>Save</strong> stays disabled until every field has a value.</li>
+          <li><strong>Duplicate</strong>, copies the connection, a quick start for another tenant on the same data centre.</li>
+          <li><strong>Delete</strong>, asks <em>“Delete this connection?”</em> before removing it. This only removes the saved settings from your browser; nothing changes in Workday.</li>
+        </ul>
+        <figure class="shot" data-src="guide/login-connection-manage.png" data-cap="Saved connections with Edit, Duplicate and Delete, and the delete confirmation prompt."></figure>
+
+        <h3>Import / export settings</h3>
+        <p>Use <strong>Export settings</strong> to download all your connections as a JSON file, and <strong>Import settings</strong> to load them on another machine or share with a colleague. Importing adds the file's connections to your list and reports how many were read and saved (e.g. <em>“Imported 3 connections, 3 saved.”</em>).</p>
+        <figure class="shot" data-src="guide/login-import-export.png" data-cap="Export / import all saved connections as a settings file."></figure>
+        <div class="warn"><strong>The settings file contains client secrets in plain text.</strong> Keep it somewhere safe and import it when required.</div>
+      </section>
+
+      <section id="explorer">
+        <h2>The Explorer</h2>
+        <p>Once connected, the workbench has three regions: the <strong>schema tree</strong> on the left, the <strong>query editor</strong> in the middle, and the <strong>results</strong> below it. The toolbar across the top switches modes and runs queries.</p>
+        <figure class="shot" data-src="guide/explorer-overview.png" data-cap="The Explorer layout: schema tree, toolbar, editor, and results."></figure>
+
+        <h3>Resizing the panes</h3>
+        <ul>
+          <li>Drag the <strong>vertical divider</strong> between the tree and the main area to widen or narrow the schema tree.</li>
+          <li>Drag the <strong>horizontal divider</strong> between the editor and the results to trade space between them.</li>
+        </ul>
+        <p>Both sizes are remembered across reloads.</p>
+
+        <h3>The toolbar</h3>
+        <figure class="shot" data-src="guide/explorer-toolbar.png" data-cap="The toolbar: mode switch, Run, Limit, Export CSV, Save/Load query, and status."></figure>
+        <ul>
+          <li><strong>Mode switch</strong>, <span class="pill">Select</span> <span class="pill">Insert</span> <span class="pill">Update</span> <span class="pill">Delete</span> <span class="pill">Export/Import</span>.</li>
+          <li><strong>Run 🟢</strong>, runs the query.</li>
+          <li><strong>Limit</strong>, rows per page (10 / 25 / 50 / 100). 100 is the API's maximum page size; to get more rows out in one go, use <strong>Export CSV</strong> or <a href="#export-import">Export/Import</a> mode, which page through everything for you.</li>
+          <li><strong>Export CSV</strong>, exports the full result set (not just the current page).</li>
+          <li><strong>Save query / Load query</strong>, save the editor’s WQL to a <code>.wql</code> file, or load one back.</li>
+          <li><strong>Status</strong>, rows returned and how long the query took.</li>
+        </ul>
+      </section>
+
+      <section id="select">
+        <h2>Select, querying data</h2>
+        <p>Select mode runs read-only WQL against any business object. It’s where you’ll spend most of your time exploring the data model.</p>
+
+        <h3>Browsing the schema tree</h3>
+        <p>The tree lists queryable data sources. Filter it with the search box, then:</p>
+        <ul>
+          <li>Click <strong>use</strong> on a source to start a query from it.</li>
+          <li>Expand a source to see its <strong>fields</strong>, each with a type glyph (<code>→</code> reference, <code>⋮</code> multi-instance, <code>#</code> numeric, <code>◷</code> date, <code>◩</code> boolean, <code>T</code> text).</li>
+          <li>Click a <strong>field</strong> to insert its alias at the cursor.</li>
+          <li>Sources with a <code>⚙ Filters &amp; prompts</code> entry let you build a prompted FROM clause.</li>
+        </ul>
+        <figure class="shot" data-src="guide/select-schema-tree.png" data-cap="The schema tree, data sources, fields with type glyphs, and filters."></figure>
+
+        <h4>Filters &amp; prompts</h4>
+        <p>Clicking <code>⚙ Filters &amp; prompts</code> opens a dialog for building a prompted <code>FROM</code> clause:</p>
+        <ol>
+          <li>If the source has more than one <strong>data source filter</strong>, choose one from the dropdown. Its description appears underneath.</li>
+          <li>Fill in the <strong>prompts</strong>. Each shows its type; required ones are marked <code>*</code>. Booleans get a true/false dropdown, dates a date picker, and instance prompts expect a WID.</li>
+          <li>Click <strong>Build query</strong> (disabled until every required prompt is filled). The editor is filled with a query using that <code>FROM</code> clause, ready for you to add fields.</li>
+        </ol>
+        <div class="tip"><strong>Big BOs.</strong> Very wide objects (like <code>allWorkers</code>) load their first couple thousand fields immediately; use <strong>“Showing N of M, load all”</strong> to pull the rest.</div>
+
+        <h3>Writing WQL</h3>
+        <p>The editor has WQL syntax highlighting and schema-aware autocomplete, press <kbd>Ctrl</kbd> + <kbd>Space</kbd> to see data sources, fields, and keywords. Run with <strong>Run 🟢</strong>.</p>
+        <figure class="shot" data-src="guide/select-autocomplete.png" data-cap="Autocomplete suggesting fields for the source in the FROM clause."></figure>
+        <pre><code>SELECT workdayID, legalName, primaryWorkEmail
+FROM allWorkers</code></pre>
+
+        <h3>Comments</h3>
+        <p>The editor supports SQL-style comments, which are stripped out before the query is sent to Workday, handy for toggling fields or clauses on and off while you iterate:</p>
+        <ul>
+          <li><code>--</code> comments out the rest of a line</li>
+          <li><code>/* … */</code> comments out a block</li>
+        </ul>
+        <figure class="shot" data-src="guide/commenting.png" data-cap="Line (--) and block (/* */) comments in the editor; both are ignored when the query runs."></figure>
+
+        <h3>Reading results</h3>
+        <figure class="shot" data-src="guide/select-results.png" data-cap="The results grid with reference chips and multi-instance cells."></figure>
+        <ul>
+          <li><strong>Reference chips</strong>, a linked instance. Click a chip to <strong>drill in</strong>: the app re-queries the same source filtered to that instance, keeping your select list. Use <strong>↩ Back</strong> to return. <kbd>Ctrl</kbd>-click instead to <em>add</em> that reference as a filter on your current query, keeping everything you've written (clicking several chips in one column merges them into a single <code>in (…)</code> list).</li>
+          <li><strong>Multi-instance cells</strong>, click to expand the list of items.</li>
+          <li><strong>Paging</strong>, <strong>Prev / Next</strong> move through pages at your chosen Limit.</li>
+        </ul>
+        <figure class="shot" data-src="guide/select-drilldown.png" data-cap="Drilling into a referenced instance from a chip."></figure>
+
+        <h3>Sorting &amp; filtering columns</h3>
+        <p>Hover a column header and click the <code>⋯</code> menu to sort or filter without editing the WQL by hand. The options match the field's type:</p>
+        <ul>
+          <li><strong>Sort ascending / descending</strong>, on any column.</li>
+          <li><strong>Text</strong>, <em>Contains…</em>, plus <em>Is blank</em> / <em>Is not blank</em>.</li>
+          <li><strong>Boolean</strong>, a <code>true</code>/<code>false</code> dropdown (WQL compares booleans with <code>=</code>).</li>
+          <li><strong>Numeric &amp; date</strong>, a comparison (<code>=</code>, <code>&gt;</code>, <code>&gt;=</code>, <code>&lt;</code>, <code>&lt;=</code>) with a value, plus blank / not blank.</li>
+          <li><strong>Instance fields</strong>, blank / not blank; filter these by <kbd>Ctrl</kbd>-clicking a chip in the grid instead.</li>
+        </ul>
+        <p>Each action rewrites the query and re-runs it. Re-applying on the same column replaces its previous filter rather than stacking a second one.</p>
+        <figure class="shot" data-src="guide/select-column-menu.png" data-cap="The column header menu, sort, contains, and blank filters."></figure>
+        <figure class="shot" data-src="guide/select-column-menu0.png" data-cap="Applying a “contains” filter rewrites the WHERE clause and re-runs the query."></figure>
+
+        <h3>Exporting &amp; saving</h3>
+        <p><strong>Export CSV</strong> streams the entire result set to a file. <strong>Save query</strong> / <strong>Load query</strong> keep a library of WQL you can reuse or share.</p>
+      </section>
+
+      <section id="insert">
+        <h2>Insert</h2>
+        <div class="note"><strong>Custom BOs only.</strong> Insert / Update / Delete are enabled only for business objects that carry your <code>BO Company ID</code>. Set that on the connection, then switch to a write mode and the tree filters to just your custom BOs.</div>
+        <p>Switch to <strong>Insert</strong> mode, pick a custom BO, and run to see its current rows. Then create records one of three ways.</p>
+        <figure class="shot" data-src="guide/insert-mode.png" data-cap="Insert mode on a custom BO, clone buttons on each row, plus New record and Bulk insert."></figure>
+
+        <h3>New record</h3>
+        <p>Click <strong>+ New record</strong> to open a form built from the BO’s writable fields. Fill what you need, empty fields are omitted so Workday applies its defaults and required-field rules. Read-only / derived fields that Workday rejects are dropped automatically and the insert retried.</p>
+        <figure class="shot" data-src="guide/insertSingleRow1.png" data-cap="The New record form, with fields typed from the BO schema."></figure>
+        <figure class="shot" data-src="guide/insertSingleRow2.png" data-cap="The newly created record, returned by re-running the query."></figure>
+
+        <h3>Clone a row</h3>
+        <p>In the results grid, the clone button (<code>⧉</code>) on a row prefills a new record from that row’s values, handy for creating variants.</p>
+        <figure class="shot" data-src="guide/CloneRow1.png" data-cap="Cloning a row prefills a New record form from that row's values."></figure>
+        <figure class="shot" data-src="guide/CloneRow2.png" data-cap="The cloned row, created as a separate new instance."></figure>
+
+        <h3>Bulk insert</h3>
+        <p><strong>⇪ Bulk insert</strong> lets you paste many rows at once, either tab/comma-delimited with a header row (a spreadsheet copy works), or a JSON array of objects. You’ll see a preview and a per-row result; rows are sent in chunks of 100.</p>
+        <figure class="shot" data-src="guide/BulkInsert1.png" data-cap="Bulk insert, paste rows (here 120), preview, then insert in batches of 100."></figure>
+        <figure class="shot" data-src="guide/BulkInsert2.png" data-cap="Bulk insert, the pasted rows are inserted"></figure>
+        <p>If Workday rejects some rows, the rest are still created. Each rejected row is listed with Workday's message, so you can fix just those rows and paste them again.</p>
+      </section>
+
+      <section id="update">
+        <h2>Update</h2>
+        <p>Switch to <strong>Update</strong> mode on a custom BO and run a query to list the rows you want to change. Each row gets an edit pencil, and a <strong>Bulk edit</strong> action appears for the whole result set.</p>
+
+        <h3>Edit one record</h3>
+        <p>Click the pencil (<code>✎</code>) on a row to open its editor. Change the fields you need, only the fields you actually change are sent back to Workday.</p>
+        <figure class="shot" data-src="guide/update-edit-record1.png" data-cap="The single-record editor, only the fields you change are sent (here, 2 changed)."></figure>
+        <figure class="shot" data-src="guide/update-edit-record2.png" data-cap="Back in the grid, the row reflects the saved changes."></figure>
+
+        <h3>Bulk edit</h3>
+        <p><strong>Bulk edit</strong> sets one field to one value across every row your query matched, similar to an <code>UPDATE table SET field = value WHERE criteria</code>. The button shows <em>Collecting…</em> while it gathers the matching ids across all pages, then the dialog opens and the change is applied in batches of 100.</p>
+        <p>A single bulk edit touches at most <strong>1,000 rows</strong>. If more match, the dialog doesn't open; a message appears next to the button instead, narrow your <code>WHERE</code> and run again.</p>
+        <figure class="shot" data-src="guide/update-bulk1.png" data-cap="Bulk edit, pick a field and value; a preview shows the exact JSON and the ids affected."></figure>
+        <figure class="shot" data-src="guide/update-bulk2.png" data-cap="After applying, every matched row shows the new value."></figure>
+      </section>
+
+      <section id="delete">
+        <h2>Delete</h2>
+        <div class="warn"><strong>Deletes are permanent.</strong> There’s no undo, the records are removed via the API.</div>
+        <p>Switch to <strong>Delete</strong> mode on a custom BO and run a query. The bar above the grid offers two ways to delete.</p>
+
+        <h3>Delete selected</h3>
+        <p>Each row gets a checkbox; the header checkbox selects the whole page. Your selection is kept as you page with Prev / Next, so you can pick rows from several pages. Then click <strong>Delete N selected</strong>.</p>
+        <figure class="shot" data-src="guide/delete-mode.png" data-cap="Delete mode, select rows with the checkboxes."></figure>
+        <p>A confirmation shows how many records will go. Nothing is sent until you click <strong>Delete</strong>. Afterwards you get a per-row result showing what was deleted and what failed, and the grid refreshes.</p>
+        <figure class="shot" data-src="guide/delete-confirm.png" data-cap="The delete confirmation and per-row results."></figure>
+
+        <h3>Delete all</h3>
+        <p><strong>Delete all N</strong> deletes <em>every row your query matches</em>, across all pages, not just the one on screen. N is the query's total match count.</p>
+        <figure class="shot" data-src="guide/delete-all-button.png" data-cap="Delete all shows the full match count (here 112), not the page size."></figure>
+        <p>When you click it, the app collects the ids of every matching row (<em>Collecting…</em>), then opens the <strong>Delete all rows</strong> confirmation. It has extra safeguards:</p>
+        <ul>
+          <li>A <strong>backup warning</strong> recommending you export the rows to <strong>JSON</strong> first, so they can be imported back.</li>
+          <li><strong>⤓ Go to Export (all fields)…</strong>, closes the dialog, switches to Export/Import mode, and loads your query with <em>every field</em> of the BO selected (same <code>FROM</code> / <code>WHERE</code>, so the same rows). See the <a href="#backup-restore">walkthrough</a>.</li>
+          <li>A tick-box, <em>“I've exported a backup, or I don't need one.”</em>, which must be ticked before the Delete button enables.</li>
+        </ul>
+        <figure class="shot" data-src="guide/delete-all-confirm.png" data-cap="The Delete all confirmation, backup warning, Go to Export, and the acknowledgement tick-box."></figure>
+        <p>Delete all is capped at <strong>1,000 rows</strong>. If more match, a message appears next to the button instead of the dialog, narrow your <code>WHERE</code>.</p>
+
+        <h3>Reading the results</h3>
+        <p>Both kinds of delete are sent in batches of 100 and end with the same per-row list. A row that fails (for example, one already deleted by someone else) shows Workday's message; the rest of the batch is unaffected.</p>
+        <div class="tip"><strong>Back up first.</strong> Before a delete you can't undo, save the rows to JSON, Delete all's <em>Go to Export</em> button does the setup for you, or follow the <a href="#backup-restore">backup &amp; restore walkthrough</a>.</div>
+      </section>
+
+      <section id="export-import">
+        <h2>Export / Import</h2>
+        <p class="lead">Save every row of a custom BO to a file, and load rows back from one, a backup before a destructive change, a way to move sample data between tenants, or just a snapshot of a data set.</p>
+        <div class="note"><strong>Custom BOs only</strong>, like the write modes. Switch to <strong>Export/Import</strong> and the tree filters to objects carrying your <code>BO Company ID</code>.</div>
+
+        <h3>Exporting</h3>
+        <p>Pick a custom BO with <strong>use</strong>, the editor is filled with a <code>SELECT</code> of every field on that object, so nothing is left out of the backup. Run it, then choose <strong>⤓ Export all rows</strong>.</p>
+        <figure class="shot" data-src="guide/export-import-query.png" data-cap="In Export/Import mode, 'use' on a custom BO builds a SELECT of all its fields."></figure>
+        <figure class="shot" data-src="guide/export-save.png" data-cap="Export all rows, the whole object (here 98 rows), not just the current page."></figure>
+        <table class="field-table">
+          <thead><tr><th>Format</th><th>Use it for</th></tr></thead>
+          <tbody>
+            <tr><td><strong>JSON</strong></td><td>Backups you may restore. A JSON array of records with references kept as objects, this is the format <strong>Import rows</strong> reads.</td></tr>
+            <tr><td><strong>CSV</strong></td><td>Reading in Excel. Flat, with references shown by descriptor, <em>not</em> re-importable.</td></tr>
+          </tbody>
+        </table>
+        <p>The export pages through <em>every row your query matches</em> regardless of the toolbar's Limit, shows a running count as it goes, and finishes with a <strong>Save As</strong> dialog so you choose the name and folder. Files are named <code>&lt;boName&gt;-&lt;timestamp&gt;.json</code> by default. If your query has a <code>WHERE</code>, only the matching rows are exported.</p>
+
+        <h3>Importing</h3>
+        <p>Choose <strong>⤒ Import rows</strong> and pick a JSON file written by Export. Before anything is sent you'll see how many rows were found, a preview of the first few, and which fields are being left out. <strong>Import</strong> then creates them in batches of 100, reporting each row's outcome and new id.</p>
+        <figure class="shot" data-src="guide/import-select-file.png" data-cap="Import rows, the file's rows are previewed, with skipped fields listed, before anything is sent."></figure>
+        <p>Fields Workday manages are never sent, because they'd be rejected: <code>workdayID</code>, <code>createdMoment</code>, <code>lastFunctionallyUpdated</code>, <code>currentOMSVersion</code>, <code>classOfInstance1</code>, <code>referenceID1</code>, and the object's own <em>self-reference</em> field, a field named after the BO whose id is the row's own <code>workdayID</code>. References are reduced to their <code>id</code>, and values the schema says are numeric or boolean are converted back from the text WQL returns.</p>
+
+        <div class="warn"><strong>Imported rows are new instances.</strong> Workday assigns a fresh <code>workdayID</code> on create, so an export → delete → import cycle restores the <em>data</em> but not the original ids, anything that referenced the old instances won't point at the new ones.</div>
+        <div class="note"><strong>Limits.</strong> Import reads up to 2000 rows per file. If Workday rejects a row, its message appears in the result list, which scrolls sideways for long errors.</div>
+      </section>
+
+      <section id="backup-restore">
+        <h2>Backup &amp; restore walkthrough</h2>
+        <p class="lead">An end-to-end example: clear out a set of test records safely, keeping a copy you can load back.</p>
+
+        <h3>1. Find the rows</h3>
+        <p>Switch to <strong>Delete</strong> mode, pick your custom BO, and write a query for the rows you want gone, for example:</p>
+        <pre><code>SELECT workdayID, applicantName
+FROM acmequerytool_abcdef_loanApplications
+WHERE applicantName contains 'TEST'</code></pre>
+        <p>Run it and check the match count on <strong>Delete all N</strong>.</p>
+
+        <h3>2. Export them to JSON</h3>
+        <p>Click <strong>Delete all N</strong>, then <strong>⤓ Go to Export (all fields)…</strong> in the confirmation. The app switches to Export/Import mode and loads the same query with every field of the BO selected. Run it, click <strong>⤓ Export all rows</strong>, keep <strong>JSON</strong>, and save the file.</p>
+        <div class="note"><strong>Why all fields?</strong> An export only contains the columns your query selects. Going through <em>Go to Export</em> guarantees the backup holds every field, not just the two in the query above.</div>
+
+        <h3>3. Delete</h3>
+        <p>Switch back to <strong>Delete</strong> mode, run the query again, click <strong>Delete all N</strong>, tick <em>“I've exported a backup”</em>, and click <strong>Delete all</strong>. Check the per-row results.</p>
+
+        <h3>4. Restore (if needed)</h3>
+        <p>In <strong>Export/Import</strong> mode, choose <strong>⤒ Import rows</strong> and pick the JSON file. Review the preview and skipped fields, then <strong>Import</strong>.</p>
+        <div class="warn"><strong>Restored rows get new ids.</strong> The data comes back, but each record has a new <code>workdayID</code>. Anything that referenced the old instances, including references from other BOs, won't point at the new ones.</div>
+      </section>
+
+      <section id="shortcuts">
+        <h2>Keyboard &amp; tips</h2>
+        <ul>
+          <li class="kbd-row"><kbd>Ctrl</kbd> + <kbd>Space</kbd>, trigger autocomplete</li>
+          <li class="kbd-row"><kbd>Ctrl</kbd> + <kbd>/</kbd>, toggle a line comment (editor-only; stripped before the query runs)</li>
+        </ul>
+        <div class="tip"><strong>Reference filters use <code>in (…)</code>.</strong> Drilling and instance filters build <code>WHERE field in (&lt;id&gt;)</code>; <code>=</code> is only used for boolean / date / numeric / text values.</div>
+        <div class="note"><strong>Where things are stored.</strong> Connections and pane sizes live in your browser (localStorage). Saved queries are files you keep yourself.</div>
+      </section>
+
+      <section id="limits">
+        <h2>Limits at a glance</h2>
+        <table class="field-table">
+          <thead><tr><th>What</th><th>Limit</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td>Rows per page in the grid</td><td>100</td><td>Toolbar Limit: 10 / 25 / 50 / 100. 100 is the API's maximum page size.</td></tr>
+            <tr><td>Fields loaded per source in the tree</td><td>2,000 at first</td><td>Use <em>load all</em> for the rest.</td></tr>
+            <tr><td>Export CSV (toolbar)</td><td>100,000 rows</td><td>Pages the whole result set.</td></tr>
+            <tr><td>Bulk insert / Import batch</td><td>100 rows per call</td><td>Larger inputs are split into batches automatically.</td></tr>
+            <tr><td>Import file</td><td>2,000 rows</td><td>JSON exports only.</td></tr>
+            <tr><td>Bulk edit</td><td>1,000 rows</td><td>Sent in batches of 100.</td></tr>
+            <tr><td>Delete (selected or all)</td><td>1,000 rows</td><td>Sent in batches of 100.</td></tr>
+            <tr><td>Settings file import</td><td>5 MB</td><td>Connections JSON.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="troubleshooting">
+        <h2>Troubleshooting</h2>
+        <table class="field-table">
+          <thead><tr><th>You see</th><th>What it means / what to do</th></tr></thead>
+          <tbody>
+            <tr><td>You're sent back to the Connect screen</td><td>Your session expired (Workday access tokens are short-lived). Click <strong>Connect</strong> again, your query text is lost, so <strong>Save query</strong> anything long first.</td></tr>
+            <tr><td>Login fails, or the browser can't reach <code>localhost:3000</code></td><td>Another program is using port 3000, or the API client's Redirect URI isn't exactly <code>http://localhost:3000/api/auth/callback</code>.</td></tr>
+            <tr><td>A business object or field isn't listed, or a query returns nothing you expect</td><td>Usually the API client's <strong>scopes</strong>. Add the functional area on the Developer Site and reconnect.</td></tr>
+            <tr><td><em>“Set a BO Company ID on this connection to use Insert, Update or Delete mode.”</em></td><td>Edit the connection and fill in <code>BO Company ID</code>.</td></tr>
+            <tr><td><em>“… mode works only on custom BOs (those containing “_abcdef_”).”</em></td><td>The query's <code>FROM</code> isn't one of your custom BOs. Pick one from the tree (it filters to custom BOs in write modes).</td></tr>
+            <tr><td>A <strong>WQL error</strong> box instead of results</td><td>Workday rejected the query; the message says why. Check clause order (see the <a href="#wql-cookbook">cookbook</a>) and that instance filters use <code>in (…)</code>, not <code>=</code>.</td></tr>
+            <tr><td>Bulk edit or Delete all shows <em>“… capped at 1,000. Add a narrower WHERE.”</em></td><td>Too many rows match. Split the job with a tighter <code>WHERE</code> and repeat.</td></tr>
+            <tr><td>An insert quietly leaves some fields out</td><td>Workday rejected them as read-only or derived (error <code>A13</code>); the app dropped them and retried. Expected for fields like <code>createdMoment</code>.</td></tr>
+            <tr><td>Some rows fail in a bulk result</td><td>Each failed row shows Workday's message; the others still went through. Fix and resend just the failed rows.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="wql-cookbook">
+        <h2>WQL cookbook</h2>
+        <p class="lead">WQL reads a lot like SQL, with a few Workday-specific twists. These are the patterns you'll reach for most, the schema tree and autocomplete fill in the field and source names.</p>
+
+        <h3>Select, sort, limit</h3>
+        <pre><code>SELECT worker, fullName, location
+FROM allWorkers
+ORDER BY fullName ASC
+LIMIT 50</code></pre>
+        <p>Rename a column with <code>AS</code>, e.g. <code>SELECT fullName AS "Worker Name"</code>. Note <code>LIMIT</code> (a query clause) caps the whole result; the toolbar's <strong>Limit</strong> is separate and just pages what's already returned.</p>
+
+        <h3>Filter text</h3>
+        <pre><code>WHERE fullName contains 'Maria'
+WHERE lastName startswith 'N'
+WHERE email endswith '@example.com'
+WHERE firstName in ('John', 'Jane')</code></pre>
+        <p><code>contains</code>, <code>startswith</code> and <code>endswith</code> are case-insensitive. Invert with <code>not contains</code> or <code>not in</code>.</p>
+
+        <h3>Filter numbers &amp; dates</h3>
+        <pre><code>WHERE age > 50
+WHERE yearsOfService >= 5 AND yearsOfService < 10
+WHERE hireDate >= '2024-01-01' AND hireDate <= '2024-12-31'</code></pre>
+        <p>There's no <code>BETWEEN</code>, use two conditions. Dates are <code>YYYY-MM-DD</code>; datetimes <code>YYYY-MM-DD HH:MM:SS</code> (append <code>Z</code> for UTC).</p>
+
+        <h3>Empty or not</h3>
+        <pre><code>WHERE terminationDate is empty
+WHERE email is not empty</code></pre>
+        <p>These back the column menu's <em>Is blank</em> / <em>Is not blank</em>.</p>
+
+        <h3>References &amp; instances</h3>
+        <p>Instance and reference fields filter with <code>in (&lt;id&gt;)</code>, never <code>=</code>, exactly what clicking (or Ctrl-clicking) a reference chip builds:</p>
+        <pre><code>WHERE manager_Level01 in (1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d)
+WHERE location in (2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e,
+                   3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f)</code></pre>
+
+        <h3>Related fields (RBO)</h3>
+        <p>Pull fields from a related business object with <code>{ }</code> in the SELECT, and filter them with <code>WHERE ON</code>, which must come <em>before</em> a plain <code>WHERE</code>:</p>
+        <pre><code>SELECT worker, dependents{legalName_LastName, age}
+FROM allWorkers
+WHERE ON dependents age > 18
+WHERE location in (2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e)</code></pre>
+
+        <h3>Prompted data sources</h3>
+        <p>Some sources take a filter and/or prompt values in the <code>FROM</code> clause, the tree's <code>⚙ Filters &amp; prompts</code> entry builds these for you. Built-in prompts can also go up front with <code>PARAMETERS</code>:</p>
+        <pre><code>PARAMETERS reportingDate = "2018-01-01"
+SELECT contractRateSheet, contractRates
+FROM contractRateSheetsForCompany(company = 4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a)</code></pre>
+
+        <h3>Group &amp; count</h3>
+        <pre><code>SELECT location, count() AS Headcount, max(yearsOfService) AS Seniority
+FROM allWorkers
+GROUP BY location
+HAVING count() > 100
+ORDER BY Headcount DESC</code></pre>
+        <p>Aggregations: <code>COUNT()</code>, <code>COUNT(DISTINCT field)</code>, <code>SUM</code>, <code>AVG</code>, <code>MIN</code>, <code>MAX</code>. You can't group by multi-instance or currency fields.</p>
+
+        <h3>Point-in-time</h3>
+        <p>Query a standard Workday source as it was on a given date:</p>
+        <pre><code>SELECT worker, location
+FROM allWorkers (effectiveAsOfDate = "2024-01-01")</code></pre>
+
+        <div class="note"><strong>Clause order is fixed:</strong> <code>PARAMETERS → SELECT → FROM → WHERE ON → WHERE → GROUP BY → HAVING → ORDER BY → LIMIT</code>. WQL sorts alphabetically, and without <code>ORDER BY</code> the row order isn't guaranteed.</p>
+      </section>
+    </main>
+  </div>
+
+  <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="Screenshot">
+    <button class="lightbox-close" id="lightboxClose" aria-label="Close">×</button>
+    <img id="lightboxImg" alt="" />
+    <div class="lightbox-cap" id="lightboxCap"></div>
+  </div>
+
+  <script>
+    // Click a screenshot to view it full size; click anywhere, press Esc, or use
+    // the × to close.
+    var lb = document.getElementById('lightbox');
+    var lbImg = document.getElementById('lightboxImg');
+    var lbCap = document.getElementById('lightboxCap');
+
+    function openLightbox(src, cap) {
+      lbImg.style.display = '';
+      lbCap.textContent = cap || '';
+      lbImg.alt = cap || '';
+      lbImg.src = src;
+      lb.classList.add('open');
+      document.body.style.overflow = 'hidden';
+    }
+    // If the full-size view can't load, say so plainly rather than showing a
+    // broken-image icon.
+    lbImg.addEventListener('error', function () {
+      if (!lb.classList.contains('open') || !lbImg.getAttribute('src')) return;
+      lbImg.style.display = 'none';
+      lbCap.textContent = 'Couldn\u2019t load the full-size image (' + lbImg.getAttribute('src') + ').';
+    });
+    function closeLightbox() {
+      lb.classList.remove('open');
+      lbImg.removeAttribute('src');
+      document.body.style.overflow = '';
+    }
+    lb.addEventListener('click', closeLightbox);
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && lb.classList.contains('open')) closeLightbox();
+    });
+  </script>
+
+  <script>
+    // Render screenshots, showing a "pending" placeholder until the image exists.
+    document.querySelectorAll('figure.shot').forEach(function (fig) {
+      var src = fig.getAttribute('data-src');
+      var cap = fig.getAttribute('data-cap') || '';
+      var img = new Image();
+      img.onload = function () {
+        fig.innerHTML = '';
+        img.alt = cap;
+        img.title = 'Click to zoom';
+        img.addEventListener('click', function () {
+          // Reuse the URL the inline image actually loaded from (absolute,
+          // already cached) rather than re-resolving the relative data-src.
+          openLightbox(img.currentSrc || img.src, cap);
+        });
+        fig.appendChild(img);
+        var fc = document.createElement('figcaption');
+        fc.textContent = cap;
+        fig.appendChild(fc);
+      };
+      img.onerror = function () {
+        fig.classList.add('pending');
+        fig.innerHTML =
+          '<div class="ph-title">Screenshot</div>' +
+          '<div>' + cap + '</div>' +
+          '<div style="margin-top:8px"><code>' + src + '</code></div>';
+      };
+      img.src = src;
+    });
+
+    // Scroll-spy: highlight the current section in the nav.
+    var links = Array.prototype.slice.call(document.querySelectorAll('.nav a'));
+    var byId = {};
+    links.forEach(function (a) { byId[a.getAttribute('href').slice(1)] = a; });
+    var obs = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) {
+          links.forEach(function (a) { a.classList.remove('active'); });
+          var a = byId[e.target.id];
+          if (a) a.classList.add('active');
+        }
+      });
+    }, { rootMargin: '-10% 0px -80% 0px', threshold: 0 });
+    document.querySelectorAll('section[id]').forEach(function (s) { obs.observe(s); });
+
+    // Mobile nav toggle.
+    var menuBtn = document.getElementById('menuBtn');
+    var sidebar = document.getElementById('sidebar');
+    if (menuBtn) {
+      menuBtn.addEventListener('click', function () { sidebar.classList.toggle('open'); });
+      sidebar.addEventListener('click', function (e) {
+        if (e.target.tagName === 'A') sidebar.classList.remove('open');
+      });
+    }
+  </script>
+</body>
+</html>

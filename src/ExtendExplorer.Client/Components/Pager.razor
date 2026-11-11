@@ -1,0 +1,46 @@
+@namespace ExtendExplorer.Client.Components
+
+@* Footer pager for the result pane. "Next" is enabled when we know there's
+   more (offset+shown < total) or — when the tenant returns no total — when the
+   page came back full, which implies another page may exist. Port of
+   components/Pager.tsx. *@
+
+<div class="pager">
+    <button class="pager-btn" @onclick="OnPrev" disabled="@(!CanPrev)" title="Previous page">
+        ← Prev
+    </button>
+    <span class="pager-range">
+        @if (PageRows > 0)
+        {
+            @($"{Fmt(From)}–{Fmt(To)}")
+            @if (Total is not null)
+            {
+                @($" of {Fmt(Total.Value)}")
+            }
+        }
+        else
+        {
+            @("no rows")
+        }
+    </span>
+    <button class="pager-btn" @onclick="OnNext" disabled="@(!CanNext)" title="Next page">
+        Next →
+    </button>
+</div>
+
+@code {
+    [Parameter] public int Offset { get; set; }        // offset of the first row on the current page
+    [Parameter] public int PageRows { get; set; }      // rows actually returned for this page
+    [Parameter] public int Limit { get; set; }         // page size
+    [Parameter] public long? Total { get; set; }       // total matching rows, if the tenant reported it
+    [Parameter] public bool Running { get; set; }
+    [Parameter] public EventCallback OnPrev { get; set; }
+    [Parameter] public EventCallback OnNext { get; set; }
+
+    private long From => PageRows > 0 ? (long)Offset + 1 : 0;
+    private long To => (long)Offset + PageRows;
+    private bool CanPrev => Offset > 0 && !Running;
+    private bool CanNext => !Running && (Total is not null ? To < Total.Value : PageRows >= Limit);
+
+    private static string Fmt(long n) => n.ToString("N0");
+}

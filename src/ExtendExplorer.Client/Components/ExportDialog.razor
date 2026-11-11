@@ -1,0 +1,156 @@
+@namespace ExtendExplorer.Client.Components
+@inject WqlMetadata Meta
+@inject Interop Interop
+
+@* Export every row of one custom BO to a file — a backup you can take before a
+   delete, and (in JSON form) feed straight back through Bulk insert. Pages the
+   query rather than relying on the current page, so the whole object comes out
+   regardless of the toolbar's Limit. *@
+
+<div class="modal-overlay">
+    <div class="modal modal-wide" @onclick:stopPropagation="true">
+        <div class="modal-head">
+            <div>
+                <div class="modal-title">@(_phase == "done" ? "Export complete" : "Export all rows")</div>
+                <div class="modal-sub">@BoName</div>
+            </div>
+            @if (_phase != "running")
+            {
+                <button class="modal-x" @onclick="OnClose">×</button>
+            }
+        </div>
+
+        <div class="modal-body rec-body">
+            @if (_error is not null)
+            {
+                <div class="connect-error">@_error</div>
+            }
+
+            @if (_phase == "edit")
+            {
+                <p class="del-warn">
+                    Exports every row this query returns@(Total is long t ? $" — {t:N0} row{(t == 1 ? "" : "s")}" : "")
+                    , not just the current page.
+                </p>
+
+                <div class="rec-field">
+                    <label class="rec-key">Format</label>
+                    <select class="rec-input" value="@_format"
+                            @onchange="@(e => _format = e.Value?.ToString() ?? "json")">
+                        <option value="json">JSON — re-importable via Bulk insert</option>
+                        <option value="csv">CSV — for reading in Excel</option>
+                    </select>
+                </div>
+
+                @if (_format == "json")
+                {
+                    <div class="note-inline">
+                        A JSON array of records, with references kept as objects. This is the
+                        format <strong>Bulk insert</strong> accepts, so you can restore rows from it later.
+                        System fields (<code>workdayID</code>, created/updated moments) are included for
+                        reference and skipped on re-import.
+                    </div>
+                }
+                else
+                {
+                    <div class="note-inline">
+                        A flat table with references shown by descriptor. Good for reading and
+                        reporting, but <strong>not</strong> a faithful backup — it can't be re-imported.
+                    </div>
+                }
+
+                <pre class="rec-result">@Preview</pre>
+            }
+
+            @if (_phase == "running")
+            {
+                <p class="del-warn">Fetching rows… @_fetched.ToString("N0") so far.</p>
+            }
+
+            @if (_phase == "done")
+            {
+                <p class="del-summary">
+                    @_fetched.ToString("N0") row@(_fetched == 1 ? "" : "s") exported@(_saved ? "." : " — save cancelled.")
+                </p>
+            }
+        </div>
+
+        <div class="modal-foot">
+            @if (_phase == "edit")
+            {
+                <button class="btn" @onclick="OnClose">Cancel</button>
+                <button class="btn btn-primary del-go" @onclick="Run">Export</button>
+            }
+            else if (_phase == "running")
+            {
+                <button class="btn" disabled>Exporting…</button>
+            }
+            else
+            {
+                <button class="btn btn-primary" @onclick="OnClose">Done</button>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string BoName { get; set; } = "";
+    [Parameter] public string Wql { get; set; } = "";
+    [Parameter] public long? Total { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private const int MaxRows = 100_000;
+
+    private string _phase = "edit"; // edit | running | done
+    private string _format = "json";
+    private string? _error;
+    private int _fetched;
+    private bool _saved;
+
+    private string Preview =>
+        _format == "json"
+            ? "[\n  { \"workdayID\": \"…\", \"field\": \"value\", \"reference\": { \"id\": \"…\" } },\n  …\n]"
+            : "workdayID,field,reference\n…";
+
+    private async Task Run()
+    {
+        _phase = "running";
+        _error = null;
+        _fetched = 0;
+        try
+        {
+            // Pages the whole object (100 rows per request — the gateway cap —
+            // 5 requests in flight) rather than relying on the toolbar's Limit.
+            var (columns, rows) = await Meta.FetchAllRowsAsync(Wql, MaxRows, n =>
+            {
+                _fetched = n;
+                InvokeAsync(StateHasChanged);
+            });
+            _fetched = rows.Count;
+
+            var stamp = DateTime.Now.ToString("yyyy-MM-dd-HHmm");
+            string content;
+            string name;
+            if (_format == "json")
+            {
+                content = System.Text.Json.JsonSerializer.Serialize(rows,
+                    new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+                name = $"{BoName}-{stamp}.json";
+            }
+            else
+            {
+                content = WqlFormat.ToCsv(columns, rows);
+                name = $"{BoName}-{stamp}.csv";
+            }
+
+            _saved = await Interop.SaveTextAsAsync(name, content);
+            _phase = "done";
+        }
+        catch (RedirectingToLoginException) { /* navigating away */ }
+        catch (Exception e)
+        {
+            _error = e.Message;
+            _phase = "edit";
+        }
+    }
+}

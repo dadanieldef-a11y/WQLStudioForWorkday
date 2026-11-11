@@ -1,0 +1,140 @@
+@namespace ExtendExplorer.Client.Components
+@inject Interop Interop
+@implements IAsyncDisposable
+
+@* WQL editor. Mounts Monaco (custom "wql" language + graphite theme) via JS
+   interop; if Monaco fails to load, falls back to a plain <textarea> so the
+   workbench still works. Two-way bound: Monaco owns its buffer and pushes
+   changes up through OnValueChanged; the parent pushes text down through
+   SetValueAsync. Port of components/QueryEditor.tsx. *@
+
+@if (_useFallback)
+{
+    <textarea id="@ElementId" class="wql-fallback"
+              spellcheck="false"
+              value="@Value"
+              @oninput="OnFallbackInput"
+              @onkeydown="OnFallbackKeyDown"></textarea>
+}
+else
+{
+    <div id="@ElementId" class="wql-editor-host"></div>
+}
+
+@code {
+    [Parameter] public string Value { get; set; } = "";
+    [Parameter] public EventCallback<string> ValueChanged { get; set; }
+    [Parameter] public EventCallback OnRun { get; set; }
+
+    private const string ElementId = "wql-editor-host";
+    private bool _useFallback;
+    private bool _mounted;
+    private DotNetObjectReference<QueryEditor>? _selfRef;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || _mounted || _useFallback) return;
+        _mounted = true;
+        try
+        {
+            _selfRef = DotNetObjectReference.Create(this);
+            var ok = await Interop.EditorCreateAsync(ElementId, Value, _selfRef);
+            if (!ok)
+            {
+                _useFallback = true;
+                StateHasChanged();
+            }
+        }
+        catch
+        {
+            // Monaco couldn't load (offline CDN, CSP, etc.) — degrade to textarea.
+            _useFallback = true;
+            StateHasChanged();
+        }
+    }
+
+    // ── called from monaco-wql.js ────────────────────────────────────────
+    [JSInvokable]
+    public async Task OnValueChanged(string v)
+    {
+        Value = v;
+        await ValueChanged.InvokeAsync(v);
+    }
+
+    [JSInvokable]
+    public Task OnRunInvoked() => OnRun.InvokeAsync();
+
+    // ── fallback textarea handlers ───────────────────────────────────────
+    private async Task OnFallbackInput(ChangeEventArgs e)
+    {
+        Value = e.Value?.ToString() ?? "";
+        await ValueChanged.InvokeAsync(Value);
+    }
+
+    private async Task OnFallbackKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && (e.CtrlKey || e.MetaKey))
+            await OnRun.InvokeAsync();
+    }
+
+    // ── parent-driven operations (forward to Monaco, or emulate on textarea) ──
+    public async Task SetValueAsync(string text)
+    {
+        Value = text;
+        if (_useFallback)
+        {
+            await ValueChanged.InvokeAsync(text);
+            StateHasChanged();
+            return;
+        }
+        await Interop.EditorSetValueAsync(ElementId, text);
+    }
+
+    // Read the editor's current text (used when saving the query to a file, so we
+    // capture exactly what's in Monaco even if the last keystroke hasn't flushed).
+    public async Task<string> GetValueAsync()
+    {
+        if (_useFallback) return Value;
+        try { return await Interop.EditorGetValueAsync(ElementId); }
+        catch { return Value; }
+    }
+
+    public async Task SetPositionAsync(int line, int column)
+    {
+        if (_useFallback) return;
+        await Interop.EditorSetPositionAsync(ElementId, line, column);
+    }
+
+    public async Task InsertAtCursorAsync(string text)
+    {
+        if (_useFallback)
+        {
+            Value = string.IsNullOrEmpty(Value) ? text : $"{Value} {text}";
+            await ValueChanged.InvokeAsync(Value);
+            StateHasChanged();
+            return;
+        }
+        await Interop.EditorInsertAtCursorAsync(ElementId, text);
+    }
+
+    public async Task FocusAsync()
+    {
+        if (_useFallback)
+        {
+            await Interop.FocusByIdAsync(ElementId);
+            return;
+        }
+        await Interop.EditorFocusAsync(ElementId);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            if (_mounted && !_useFallback)
+                await Interop.EditorDisposeAsync(ElementId);
+        }
+        catch { /* teardown best-effort */ }
+        _selfRef?.Dispose();
+    }
+}
