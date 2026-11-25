@@ -29,11 +29,38 @@ public sealed class WqlMetadata
         _interop = interop;
     }
 
-    public async Task<List<DataSourceDto>> FetchDataSourcesAsync(bool force = false)
+    // Rows per browser→server step when loading the data-source list or a
+    // source's fields with progress; the bar updates after each step. The
+    // server fetches a step from Workday as 100-row pages, 5 at a time. The
+    // first step learns the total (one page on its own, then the other four);
+    // every later step passes that total back so all five pages go at once —
+    // one round per 500 rows. 2,000 fields: 5 rounds, 4 progress updates.
+    private const int LoadStep = 500;
+
+    // onProgress(loaded, total) is called after each step; total is Workday's
+    // count once the first step has reported it.
+    public async Task<List<DataSourceDto>> FetchDataSourcesAsync(
+        bool force = false, Action<int, int?>? onProgress = null)
     {
         if (_dataSourceCache is not null && !force) return _dataSourceCache;
-        var json = await _api.GetJsonAsync<DataSourcesResponse>("/api/workday/datasources");
-        _dataSourceCache = json?.DataSources ?? new();
+
+        var all = new List<DataSourceDto>();
+        int? total = null;
+        var offset = 0;
+        while (true)
+        {
+            var url = $"/api/workday/datasources?offset={offset}&limit={LoadStep}";
+            if (total is int known) url += $"&total={known}";
+            var json = await _api.GetJsonAsync<DataSourcesResponse>(url);
+            var got = json?.DataSources ?? new();
+            total ??= json?.Total;
+            all.AddRange(got);
+            offset += LoadStep;
+            onProgress?.Invoke(all.Count, total);
+            if (got.Count == 0 || total is null || offset >= total.Value) break;
+        }
+        all.Sort((a, b) => string.CompareOrdinal(a.Alias, b.Alias));
+        _dataSourceCache = all;
         // Share with the editor's completion provider so autocomplete doesn't
         // have to re-fetch this (slow, on a large tenant) list itself.
         await _interop.PrimeDataSourcesAsync(_dataSourceCache);
@@ -56,11 +83,36 @@ public sealed class WqlMetadata
     // load a first batch fast for very wide BOs, then the rest on demand. Not
     // cached — the tree accumulates and calls PrimeFieldsAsync once the full set
     // is in. Returns the window plus the source's full field count.
+    // Fetch a window of a source's fields in LoadStep-sized steps, reporting
+    // progress after each. `limit` null means "to the end".
+    public async Task<(List<FieldDto> Fields, int Total)> FetchFieldsWithProgressAsync(
+        string dataSourceId, int offset, int? limit, Action<int, int?>? onProgress = null)
+    {
+        var fields = new List<FieldDto>();
+        int? total = null;
+        var pos = offset;
+        while (true)
+        {
+            var want = limit is int lim ? Math.Min(LoadStep, offset + lim - pos) : LoadStep;
+            if (want <= 0) break;
+            var (got, t) = await FetchFieldsPageAsync(dataSourceId, pos, want, total);
+            total ??= t;
+            fields.AddRange(got);
+            pos += want;
+            onProgress?.Invoke(fields.Count, limit is int l2 ? Math.Min(l2, Math.Max(0, t - offset)) : Math.Max(0, t - offset));
+            if (got.Count == 0 || pos >= t) break;
+        }
+        return (fields, total ?? fields.Count);
+    }
+
+    // knownTotal: the source's field count, if an earlier call reported it —
+    // lets the server fetch every page of the window at once.
     public async Task<(List<FieldDto> Fields, int Total)> FetchFieldsPageAsync(
-        string dataSourceId, int offset, int? limit)
+        string dataSourceId, int offset, int? limit, int? knownTotal = null)
     {
         var url = $"/api/workday/datasources/{Uri.EscapeDataString(dataSourceId)}/fields?offset={offset}";
         if (limit is int lim) url += $"&limit={lim}";
+        if (knownTotal is int kt && limit is not null) url += $"&total={kt}";
         var json = await _api.GetJsonAsync<FieldsResponse>(url);
         var fields = json?.Fields ?? new();
         return (fields, json?.Total ?? fields.Count);
@@ -97,59 +149,108 @@ public sealed class WqlMetadata
         return map;
     }
 
-    // Run a query and page through the WHOLE result set, fetching several pages
-    // at a time. Used by CSV export and the Export mode backup, where the
-    // toolbar's Limit shouldn't decide how much data comes out.
+    // Run a query and page through the WHOLE result set, handing each page to
+    // `onPage` (in row order) as it arrives instead of collecting the rows — so
+    // an export of any size never has to fit in memory. Used by the Export
+    // dialog, where the toolbar's Limit shouldn't decide how much data comes out.
+    //
+    // The query is paged exactly as written. Each page is a separate run of it,
+    // so the result reports what a caller needs to judge whether the export is
+    // complete: Workday's total, the rows actually fetched, and how many
+    // workdayIDs came back more than once (a sign rows shifted between pages).
     //
     // The first page is fetched on its own: it warms WQL's per-session result
     // cache and reports `total`, which tells us how many more pages to ask for.
     // Paging stops on a short page as well, so an unknown total still terminates.
-    public async Task<(List<string> Columns, List<Dictionary<string, JsonElement>> Rows)>
-        FetchAllRowsAsync(string wql, int maxRows, Action<int>? onProgress = null)
+    // Cancellation is checked before each batch of pages is requested.
+    public async Task<StreamRowsResult> StreamAllRowsAsync(
+        string wql,
+        Func<WqlResult, Task> onPage,
+        Action<int, long?>? onProgress = null,
+        CancellationToken cancel = default)
     {
         const int pageSize = 100;   // WCP API Gateway caps `limit` at 100
         const int concurrency = 5;
-
-        var columns = new List<string>();
-        var seen = new HashSet<string>();
-        var rows = new List<Dictionary<string, JsonElement>>();
-
-        void Absorb(WqlResult r)
-        {
-            foreach (var c in r.Columns)
-                if (seen.Add(c)) columns.Add(c);
-            rows.AddRange(r.Rows);
-        }
+        // Duplicate tracking keeps one entry per row; past this many it stops
+        // (and the result says the ids weren't fully checked) rather than
+        // letting the set grow without bound.
+        const int maxTrackedIds = 2_000_000;
 
         var first = await RunWqlAsync(wql, pageSize, 0);
-        Absorb(first);
-        onProgress?.Invoke(rows.Count);
-        if (first.Rows.Count < pageSize) return (columns, rows);
 
-        var cap = maxRows;
-        if (first.Total is long t) cap = (int)Math.Min(cap, t);
+        var total = first.Total;
+        var count = 0;
+        var idCount = 0;
+        var duplicateIds = 0;
+        var idOverflow = false;
+        // Workday ids are 32 hex digits, so they're tracked compactly as Guids;
+        // anything else falls back to the string itself.
+        var guidIds = new HashSet<Guid>();
+        var otherIds = new HashSet<string>(StringComparer.Ordinal);
 
-        var offset = pageSize;
-        while (rows.Count < cap)
+        void TrackIds(WqlResult page)
         {
-            var offsets = new List<int>();
-            for (var i = 0; i < concurrency && offset < cap; i++, offset += pageSize)
-                offsets.Add(offset);
-            if (offsets.Count == 0) break;
-
-            var results = await Task.WhenAll(offsets.Select(o => RunWqlAsync(wql, pageSize, o)));
-            var shortPage = false;
-            foreach (var r in results) // Task.WhenAll keeps input order, so rows stay in offset order
+            foreach (var row in page.Rows)
             {
-                Absorb(r);
-                if (r.Rows.Count < pageSize) shortPage = true;
+                var key = row.Keys.FirstOrDefault(k => k.Equals("workdayID", StringComparison.OrdinalIgnoreCase));
+                if (key is null) continue;
+                var v = row[key];
+                var id = v.ValueKind == JsonValueKind.String ? v.GetString() : WqlFormat.RefId(v);
+                if (string.IsNullOrEmpty(id)) continue;
+                idCount++;
+                if (guidIds.Count + otherIds.Count >= maxTrackedIds)
+                {
+                    idOverflow = true;
+                    continue;
+                }
+                var isNew = Guid.TryParseExact(id, "N", out var g) ? guidIds.Add(g) : otherIds.Add(id);
+                if (!isNew) duplicateIds++;
             }
-            onProgress?.Invoke(rows.Count);
-            if (shortPage) break;
         }
 
-        if (rows.Count > maxRows) rows = rows.Take(maxRows).ToList();
-        return (columns, rows);
+        async Task TakeAsync(WqlResult page)
+        {
+            TrackIds(page);
+            count += page.Rows.Count;
+            await onPage(page);
+            onProgress?.Invoke(count, total);
+        }
+
+        await TakeAsync(first);
+
+        if (first.Rows.Count >= pageSize)
+        {
+            var offset = pageSize;
+            while (true)
+            {
+                cancel.ThrowIfCancellationRequested();
+
+                var offsets = new List<int>();
+                while (offsets.Count < concurrency && (!total.HasValue || offset < total.Value))
+                {
+                    offsets.Add(offset);
+                    offset += pageSize;
+                }
+                if (offsets.Count == 0) break;
+
+                var results = await Task.WhenAll(offsets.Select(o => RunWqlAsync(wql, pageSize, o)));
+                var shortPage = false;
+                foreach (var r in results) // Task.WhenAll keeps input order, so rows stay in offset order
+                {
+                    await TakeAsync(r);
+                    if (r.Rows.Count < pageSize) shortPage = true;
+                }
+                if (shortPage) break;
+            }
+        }
+
+        return new StreamRowsResult
+        {
+            Total = total,
+            Count = count,
+            IdsChecked = idCount > 0 && !idOverflow,
+            DuplicateIds = duplicateIds,
+        };
     }
 
     // Page through a query collecting just the id column, bailing out once past
@@ -336,6 +437,23 @@ public sealed class WqlMetadata
         }
         return $"Query failed ({status})";
     }
+}
+
+// What StreamAllRowsAsync paged through, with what's needed to judge whether it
+// was the complete result set.
+public sealed class StreamRowsResult
+{
+    // The total Workday reported on the first page, when it gave one.
+    public long? Total { get; init; }
+    // Rows actually fetched (and handed to onPage).
+    public int Count { get; init; }
+    // Every row's workdayID was tracked, so DuplicateIds means something.
+    public bool IdsChecked { get; init; }
+    // workdayIDs seen more than once across the pages.
+    public int DuplicateIds { get; init; }
+
+    // Fetched a different number of rows than Workday said the query matches.
+    public bool CountMismatch => Total.HasValue && Total.Value != Count;
 }
 
 // Normalized WQL result: the SELECT-derived column order, the row objects (each

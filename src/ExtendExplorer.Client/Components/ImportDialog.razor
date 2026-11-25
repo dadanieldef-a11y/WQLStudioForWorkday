@@ -1,13 +1,19 @@
 @namespace ExtendExplorer.Client.Components
 @inject ApiClient Api
 @inject BoFields BoFieldsSvc
+@inject Interop Interop
 @using System.Net
+@using System.Text
 @using System.Text.Json.Nodes
 
 @* Load rows from a JSON file written by Export and create them in the chosen
    custom BO. Records are sanitised first: Workday-managed fields are dropped and
    references are reduced to { id }, so a file exported from this tool imports
-   cleanly. Inserts go through the same bulk endpoint as Bulk insert. *@
+   cleanly. Inserts go through the same bulk endpoint as Bulk insert.
+
+   There is no row limit: the file is read record by record, then sent 100 rows
+   at a time with a progress bar. The run can be stopped, and a stopped or
+   session-expired run offers the rows that weren't sent as a file. *@
 
 <div class="modal-overlay">
     <div class="modal modal-wide modal-xl" @onclick:stopPropagation="true">
@@ -33,7 +39,7 @@
                 <p class="bulk-hint">
                     Choose a JSON file previously written by <strong>Export all rows</strong> (a JSON array of
                     records). Rows are created as <em>new</em> instances — this restores data, it doesn't
-                    overwrite existing rows.
+                    overwrite existing rows. Every row in the file is imported; there is no row limit.
                 </p>
 
                 <div class="rec-field">
@@ -44,10 +50,15 @@
                     </label>
                 </div>
 
-                @if (_fileName is not null)
+                @if (_reading)
+                {
+                    <p class="del-warn">Reading @_fileName… @_readCount.ToString("N0") rows so far.</p>
+                }
+
+                @if (_fileName is not null && !_reading)
                 {
                     <div class="note-inline">
-                        <strong>@_fileName</strong> — @_records.Count row@(_records.Count == 1 ? "" : "s") ready.
+                        <strong>@_fileName</strong> — @_records.Count.ToString("N0") row@(_records.Count == 1 ? "" : "s") ready.
                         <br />
                         <strong>Sending @_columns.Count field@(_columns.Count == 1 ? "" : "s"):</strong>
                         <code>@string.Join(", ", _columns.Take(14))</code>@(_columns.Count > 14 ? "…" : "")
@@ -97,7 +108,7 @@
                         </div>
                         @if (_records.Count > PreviewRows)
                         {
-                            <p class="bulk-hint">…and @(_records.Count - PreviewRows) more.</p>
+                            <p class="bulk-hint">…and @((_records.Count - PreviewRows).ToString("N0")) more.</p>
                         }
                     }
                 }
@@ -105,13 +116,53 @@
 
             @if (_phase == "running")
             {
-                <p class="del-warn">Importing… @_progress/@_records.Count row@(_records.Count == 1 ? "" : "s").</p>
+                <p class="del-warn">@RunningText</p>
+                <div class="progress" role="progressbar" aria-label="Import progress"
+                     aria-valuemin="0" aria-valuemax="100" aria-valuenow="@ImportPercent">
+                    <div class="progress-fill" style="width:@(ImportPercent)%"></div>
+                </div>
+                <p class="bulk-hint">
+                    @_okCount.ToString("N0") created, @_failCount.ToString("N0") failed so far.
+                    Rows are sent @ChunkSize at a time. Keep this tab open until it finishes.
+                </p>
                 @ResultList
             }
 
             @if (_phase == "done")
             {
-                <p class="del-summary">@OkCount imported@(FailCount > 0 ? $", {FailCount} failed" : "").</p>
+                <p class="del-summary">@_okCount.ToString("N0") imported@(_failCount > 0 ? $", {_failCount:N0} failed" : "").</p>
+                @if (_stopReason == "expired")
+                {
+                    <div class="connect-error">
+                        Your Workday session expired part-way through.
+                        <strong>@UnsentCount.ToString("N0") row@(UnsentCount == 1 ? "" : "s") (from row @((_unsentFrom + 1).ToString("N0")) onward) were not sent.</strong>
+                        The earlier rows were already sent, so importing the original file again would create them twice.
+                        Save the unsent rows, reconnect, then import that file instead.
+                    </div>
+                }
+                else if (_stopReason == "cancelled")
+                {
+                    <div class="connect-error">
+                        Import stopped.
+                        <strong>@UnsentCount.ToString("N0") row@(UnsentCount == 1 ? "" : "s") (from row @((_unsentFrom + 1).ToString("N0")) onward) were not sent.</strong>
+                        The earlier rows were already sent, so importing the original file again would create them twice.
+                        To finish later, save the unsent rows and import that file.
+                    </div>
+                }
+                @if (_unsentSaved)
+                {
+                    <p class="bulk-hint">Unsent rows saved.</p>
+                }
+                @if (!ShowAllRows)
+                {
+                    <p class="bulk-hint">
+                        @(_failCount == 0
+                            ? "No rows failed."
+                            : _failCount > _results.Count
+                                ? $"Showing the first {_results.Count:N0} of {_failCount:N0} failed rows."
+                                : "Showing the failed rows.")
+                    </p>
+                }
                 @ResultList
             }
         </div>
@@ -120,13 +171,25 @@
             @if (_phase == "edit")
             {
                 <button class="btn" @onclick="OnClose">Cancel</button>
-                <button class="btn btn-primary del-go" @onclick="Import" disabled="@(_records.Count == 0)">
-                    Import @(_records.Count > 0 ? _records.Count.ToString() : "") row@(_records.Count == 1 ? "" : "s")
+                <button class="btn btn-primary del-go" @onclick="Import" disabled="@(_records.Count == 0 || _reading)">
+                    Import @(_records.Count > 0 ? _records.Count.ToString("N0") : "") row@(_records.Count == 1 ? "" : "s")
                 </button>
             }
             else if (_phase == "running")
             {
-                <button class="btn" disabled>Importing…</button>
+                <button class="btn" @onclick="@(() => _cancelRequested = true)" disabled="@_cancelRequested">
+                    @(_cancelRequested ? "Stopping…" : "Stop import")
+                </button>
+            }
+            else if (_stopReason == "expired")
+            {
+                <button class="btn" @onclick="SaveUnsent">⤓ Save unsent rows</button>
+                <button class="btn btn-primary" @onclick="@(() => Api.RedirectToLogin())">Reconnect</button>
+            }
+            else if (_stopReason == "cancelled")
+            {
+                <button class="btn" @onclick="SaveUnsent">⤓ Save unsent rows</button>
+                <button class="btn btn-primary" @onclick="Finish">Done</button>
             }
             else
             {
@@ -143,8 +206,15 @@
     [Parameter] public EventCallback OnImported { get; set; }
 
     private const int ChunkSize = 100;
-    private const int MaxRows = 2000;
     private const int PreviewRows = 5;
+    // Largest file the browser will hand over. The file is read as a stream, so
+    // this is a sanity bound rather than a memory budget.
+    private const long MaxFileBytes = 2L * 1024 * 1024 * 1024;
+    // Up to this many rows, every row's outcome is listed (as before). Beyond
+    // it only failed rows are listed — a result line per row would swamp the
+    // page on a large import — and only the first FailListMax of those.
+    private const int FullListMax = 500;
+    private const int FailListMax = 500;
 
     // Workday-managed: present in an export for reference, never settable.
     private static readonly HashSet<string> SystemKeys = new(StringComparer.OrdinalIgnoreCase)
@@ -166,17 +236,41 @@
     private string _phase = "edit"; // edit | running | done
     private string? _error;
     private string? _fileName;
+    private bool _reading;
+    private int _readCount;
     private List<JsonObject> _records = new();
     private List<string> _columns = new();
     private readonly List<string> _systemDropped = new();
     private readonly List<string> _notWritable = new();
     private readonly List<RowResult> _results = new();
     private int _progress;
+    private int _okCount;
+    private int _failCount;
     private List<BoFieldDto> _meta = new();
 
+    // Parse state, filled record by record while the file is read.
+    private readonly Dictionary<string, BoFieldDto> _writable = new(StringComparer.OrdinalIgnoreCase);
+    private bool _haveMeta;
+    private readonly HashSet<string> _systemDroppedSet = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _notWritableSet = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _seenCols = new(StringComparer.OrdinalIgnoreCase);
+
+    // A run that ends early — the session expired ("expired") or the user
+    // stopped it ("cancelled") — keeps its results on screen, and the rows from
+    // _unsentFrom on can be saved to a file for a later import (instead of the
+    // original file being re-run, which would duplicate the rows already created).
+    private string? _stopReason;
+    private int _unsentFrom = -1;
+    private bool _cancelRequested;
+    private bool _unsentSaved;
+    private int UnsentCount => _unsentFrom < 0 ? 0 : Math.Max(0, _records.Count - _unsentFrom);
+
+    private bool ShowAllRows => _records.Count <= FullListMax;
     private List<string> PreviewCols => _columns.Take(8).ToList();
-    private int OkCount => _results.Count(r => r.Ok);
-    private int FailCount => _results.Count - OkCount;
+    private int ImportPercent => _records.Count == 0 ? 0 : (int)Math.Min(100, _progress * 100L / _records.Count);
+    private string RunningText => _cancelRequested
+        ? "Stopping after the current batch…"
+        : $"Importing… {_progress:N0} of {_records.Count:N0} rows ({ImportPercent}%)";
 
     protected override async Task OnInitializedAsync()
     {
@@ -184,38 +278,100 @@
             _meta = await BoFieldsSvc.FetchByIdAsync(DataSourceId) ?? new();
     }
 
-    private async Task OnPickFile(InputFileChangeEventArgs e)
+    // ── reading the file ─────────────────────────────────────────────────
+    private void ResetParsed()
     {
-        _error = null;
         _records = new();
         _columns = new();
         _systemDropped.Clear();
         _notWritable.Clear();
+        _systemDroppedSet.Clear();
+        _notWritableSet.Clear();
+        _seenCols.Clear();
+        _readCount = 0;
+
+        // The BO's own field metadata is the allow-list when we have it: it
+        // already excludes Workday-managed fields AND the BO's self-reference
+        // (a field named after the object whose id is the row's workdayID),
+        // which a fixed name list can't know about. Without metadata we fall
+        // back to dropping the well-known system keys plus anything that looks
+        // like a self-reference.
+        _writable.Clear();
+        foreach (var m in _meta) _writable[m.Key] = m;
+        _haveMeta = _writable.Count > 0;
+    }
+
+    private async Task OnPickFile(InputFileChangeEventArgs e)
+    {
+        _error = null;
+        ResetParsed();
 
         var file = e.File;
         if (file is null) return;
         _fileName = file.Name;
+        _reading = true;
+        StateHasChanged();
 
         try
         {
-            using var stream = file.OpenReadStream(32 * 1024 * 1024); // 32 MB cap
-            using var reader = new StreamReader(stream);
-            var text = await reader.ReadToEndAsync();
-            Parse(text);
+            // Read the array one record at a time, so the whole file never has to
+            // be held as text — this is what lets a file of any length import.
+            var streamed = false;
+            try
+            {
+                await using var stream = file.OpenReadStream(MaxFileBytes);
+                await foreach (var item in JsonSerializer.DeserializeAsyncEnumerable<JsonElement>(stream))
+                {
+                    AddRecord(item);
+                    if (++_readCount % 2000 == 0)
+                    {
+                        StateHasChanged();
+                        await Task.Yield();
+                    }
+                }
+                streamed = true;
+            }
+            catch (JsonException)
+            {
+                // Not a plain top-level array (an object wrapping one, or a file
+                // saved with a byte-order mark) — read it whole instead.
+            }
+
+            if (!streamed)
+            {
+                ResetParsed();
+                using var stream = file.OpenReadStream(MaxFileBytes);
+                using var reader = new StreamReader(stream);
+                ParseWhole(await reader.ReadToEndAsync());
+            }
+
+            _systemDropped.AddRange(_systemDroppedSet);
+            _notWritable.AddRange(_notWritableSet);
+
+            if (_error is null && _records.Count == 0)
+                _error = _haveMeta
+                    ? "No writable fields found in that file for this business object — check you picked the right file."
+                    : "No importable records found in that file.";
         }
         catch (Exception ex)
         {
+            ResetParsed();
             _error = $"Couldn't read the file: {ex.Message}";
             _fileName = null;
         }
+        finally
+        {
+            _reading = false;
+        }
     }
 
-    private void Parse(string text)
+    // Whole-file fallback: a bare array, or an object wrapping one
+    // (e.g. { "data": [ … ] }).
+    private void ParseWhole(string text)
     {
         using var doc = JsonDocument.Parse(text);
         var root = doc.RootElement;
 
-        // Accept a bare array, or an object wrapping one (e.g. { "data": [ … ] }).
         JsonElement arr;
         if (root.ValueKind == JsonValueKind.Array) arr = root;
         else if (root.ValueKind == JsonValueKind.Object
@@ -226,73 +382,55 @@
             return;
         }
 
-        // The BO's own field metadata is the allow-list when we have it: it
-        // already excludes Workday-managed fields AND the BO's self-reference
-        // (a field named after the object whose id is the row's workdayID),
-        // which a fixed name list can't know about. Without metadata we fall
-        // back to dropping the well-known system keys plus anything that looks
-        // like a self-reference.
-        var writable = new Dictionary<string, BoFieldDto>(StringComparer.OrdinalIgnoreCase);
-        foreach (var m in _meta) writable[m.Key] = m;
-        var haveMeta = writable.Count > 0;
-
-        var systemDropped = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var notWritable = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var cols = new List<string>();
-        var seenCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
         foreach (var item in arr.EnumerateArray())
         {
-            if (item.ValueKind != JsonValueKind.Object) continue;
+            AddRecord(item);
+            _readCount++;
+        }
+    }
 
-            // This row's own instance id, so a self-reference can be spotted
-            // even without metadata.
-            var selfId = Str(item, "workdayID") ?? Str(item, "standardWorkdayID");
+    // Sanitise one exported record and queue it for import.
+    private void AddRecord(JsonElement item)
+    {
+        if (item.ValueKind != JsonValueKind.Object) return;
 
-            var rec = new JsonObject();
-            foreach (var p in item.EnumerateObject())
+        // This row's own instance id, so a self-reference can be spotted
+        // even without metadata.
+        var selfId = Str(item, "workdayID") ?? Str(item, "standardWorkdayID");
+
+        var rec = new JsonObject();
+        foreach (var p in item.EnumerateObject())
+        {
+            if (SystemKeys.Contains(p.Name)) { _systemDroppedSet.Add(p.Name); continue; }
+
+            if (_haveMeta)
             {
-                if (SystemKeys.Contains(p.Name)) { systemDropped.Add(p.Name); continue; }
-
-                if (haveMeta)
+                if (!_writable.ContainsKey(p.Name))
                 {
-                    if (!writable.ContainsKey(p.Name))
-                    {
-                        // The BO's own self-reference is Workday-managed rather
-                        // than a mismatch, so report it as such.
-                        if (IsSelfReference(p.Value, selfId)) systemDropped.Add(p.Name);
-                        else notWritable.Add(p.Name);
-                        continue;
-                    }
-                }
-                else if (IsSelfReference(p.Value, selfId))
-                {
-                    systemDropped.Add(p.Name);
+                    // The BO's own self-reference is Workday-managed rather
+                    // than a mismatch, so report it as such.
+                    if (IsSelfReference(p.Value, selfId)) _systemDroppedSet.Add(p.Name);
+                    else _notWritableSet.Add(p.Name);
                     continue;
                 }
-
-                var node = Sanitize(p.Value);
-                if (node is null) continue;
-
-                // Export writes numbers as strings; send them back as the type
-                // the field expects so Workday doesn't reject them.
-                if (haveMeta) node = Coerce(node, writable[p.Name]);
-
-                rec[p.Name] = node;
-                if (seenCols.Add(p.Name)) cols.Add(p.Name);
             }
-            if (rec.Count > 0) _records.Add(rec);
-            if (_records.Count >= MaxRows) break;
+            else if (IsSelfReference(p.Value, selfId))
+            {
+                _systemDroppedSet.Add(p.Name);
+                continue;
+            }
+
+            var node = Sanitize(p.Value);
+            if (node is null) continue;
+
+            // Export writes numbers as strings; send them back as the type
+            // the field expects so Workday doesn't reject them.
+            if (_haveMeta) node = Coerce(node, _writable[p.Name]);
+
+            rec[p.Name] = node;
+            if (_seenCols.Add(p.Name)) _columns.Add(p.Name);
         }
-
-        _columns = cols;
-        _systemDropped.AddRange(systemDropped);
-        _notWritable.AddRange(notWritable);
-
-        if (_records.Count == 0)
-            _error = haveMeta
-                ? "No writable fields found in that file for this business object — check you picked the right file."
-                : "No importable records found in that file.";
+        if (rec.Count > 0) _records.Add(rec);
     }
 
     private static string? Str(JsonElement obj, string name) =>
@@ -353,33 +491,63 @@
         }
     }
 
+    // ── importing ────────────────────────────────────────────────────────
+    private void AddResult(RowResult r)
+    {
+        if (r.Ok) _okCount++; else _failCount++;
+        if (ShowAllRows || (!r.Ok && _results.Count < FailListMax)) _results.Add(r);
+    }
+
     private async Task Import()
     {
         _phase = "running";
         _error = null;
         _results.Clear();
         _progress = 0;
+        _okCount = 0;
+        _failCount = 0;
+        _stopReason = null;
+        _unsentFrom = -1;
+        _cancelRequested = false;
+        _unsentSaved = false;
 
         for (var start = 0; start < _records.Count; start += ChunkSize)
         {
-            var chunk = _records.Skip(start).Take(ChunkSize).ToList();
+            if (_cancelRequested)
+            {
+                // Stopped by the user between batches: everything from `start` on is unsent.
+                _stopReason = "cancelled";
+                _unsentFrom = start;
+                break;
+            }
+
+            var chunk = _records.GetRange(start, Math.Min(ChunkSize, _records.Count - start));
             try
             {
                 var (status, body) = await Api.PostRawAsync("/api/workday/insert-bulk",
                     new { boName = BoName, records = chunk });
-                if (status == (int)HttpStatusCode.Unauthorized) { Api.RedirectToLogin(); return; }
+                if (status == (int)HttpStatusCode.Unauthorized)
+                {
+                    // Nothing sent yet — just go back to the Connect screen.
+                    if (start == 0) { Api.RedirectToLogin(); return; }
+                    // Session expired mid-run. A 401 means this chunk was rejected,
+                    // so everything from `start` on is unsent; keep what we have.
+                    _stopReason = "expired";
+                    _unsentFrom = start;
+                    break;
+                }
 
                 if (status < 200 || status >= 300)
                 {
                     var msg = ErrorFrom(body) ?? status.ToString();
                     for (var i = 0; i < chunk.Count; i++)
-                        _results.Add(new RowResult { Index = start + i, Ok = false, Status = status, Error = msg });
+                        AddResult(new RowResult { Index = start + i, Ok = false, Status = status, Error = msg });
                 }
                 else
                 {
                     var data = Deserialize<InsertBulkResponse>(body);
                     foreach (var r in data?.Results ?? new())
-                        _results.Add(new RowResult
+                        AddResult(new RowResult
                         {
                             Index = start + r.Index,
                             Ok = r.Ok,
@@ -392,13 +560,60 @@
             catch (Exception e)
             {
                 for (var i = 0; i < chunk.Count; i++)
-                    _results.Add(new RowResult { Index = start + i, Ok = false, Status = 0, Error = e.Message });
+                    AddResult(new RowResult { Index = start + i, Ok = false, Status = 0, Error = e.Message });
             }
             _progress = Math.Min(start + ChunkSize, _records.Count);
             StateHasChanged();
         }
 
         _phase = "done";
+    }
+
+    // Save the rows that were never sent (after a stop or a mid-run session
+    // expiry) as a JSON array this dialog can load again. Written in pieces, so
+    // a large remainder doesn't have to be built as one string.
+    private async Task SaveUnsent()
+    {
+        if (_unsentFrom < 0 || _unsentFrom >= _records.Count) return;
+        _error = null;
+
+        var stamp = DateTime.Now.ToString("yyyy-MM-dd-HHmm");
+        string? file;
+        try
+        {
+            file = await Interop.ExportOpenAsync(
+                $"{BoName}-unsent-{stamp}.json", "JSON file", "application/json", ".json");
+        }
+        catch (Exception e)
+        {
+            _error = $"Couldn't open a file to save to: {e.Message}";
+            return;
+        }
+        if (file is null) return; // cancelled the Save dialog
+
+        try
+        {
+            var sb = new StringBuilder();
+            for (var i = _unsentFrom; i < _records.Count; i++)
+            {
+                sb.Append(i == _unsentFrom ? "[\n" : ",\n");
+                sb.Append(_records[i].ToJsonString());
+                if (sb.Length > 200_000)
+                {
+                    await Interop.ExportWriteAsync(file, sb.ToString());
+                    sb.Clear();
+                }
+            }
+            sb.Append("\n]");
+            await Interop.ExportWriteAsync(file, sb.ToString());
+            await Interop.ExportCloseAsync(file);
+            _unsentSaved = true;
+        }
+        catch (Exception e)
+        {
+            await Interop.ExportAbortAsync(file);
+            _error = $"Couldn't save the unsent rows: {e.Message}";
+        }
     }
 
     private async Task Finish()

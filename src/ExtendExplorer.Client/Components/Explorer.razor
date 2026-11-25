@@ -32,7 +32,8 @@
     </header>
 
     <div class="workspace" style="@($"grid-template-columns: {_layout.TreeWidth}px 6px 1fr")">
-        <SchemaTree OnInsert="InsertText"
+        <SchemaTree OnBusyChanged="@(b => _treeBusy = b)"
+                    OnInsert="InsertText"
                     OnUseSource="UseSource"
                     OnApplyFromClause="ApplyFromClause"
                     OnSourcesLoaded="OnSourcesLoaded"
@@ -55,7 +56,7 @@
                      OnSaveQuery="SaveQuery"
                      OnLoadQuery="LoadQuery"
                      CanExport="@(_result is not null && _result.Rows.Count > 0)"
-                     Exporting="_exporting"
+                     Exporting="_csvExportOpen"
                      RowCount="@(_result is not null ? _result.Rows.Count : (long?)null)"
                      Total="@(_result?.Total)"
                      ElapsedMs="_elapsed" />
@@ -208,6 +209,17 @@
                       OnClose="@(() => _exportOpen = false)" />
     }
 
+    @* The toolbar's Export CSV: any query, any mode. *@
+    @if (_csvExportOpen && _executedWql is not null)
+    {
+        <ExportDialog BoName="@(_ranSource ?? "wql-export")"
+                      Wql="@_executedWql"
+                      Total="@(_result?.Total)"
+                      Format="csv"
+                      AutoStart="true"
+                      OnClose="@(() => _csvExportOpen = false)" />
+    }
+
     @if (_importOpen && CanExportAll && _ranSource is not null)
     {
         <ImportDialog BoName="@_ranSource"
@@ -241,11 +253,12 @@
     private QueryMode _mode = QueryMode.Select;
 
     private bool _running;
+    private bool _treeBusy;   // schema tree is loading metadata (progress popup up)
     private WqlResult? _result;
     private string? _error;
     private long? _elapsed;
     private int _offset;
-    private bool _exporting;
+    private bool _csvExportOpen;   // toolbar "Export CSV" dialog
 
     private string? _executedWql;
     private string? _ranSource;
@@ -351,7 +364,9 @@
     // ── execution ────────────────────────────────────────────────────────
     private async Task Execute(string wql, int off)
     {
-        if (string.IsNullOrEmpty(wql) || _running) return;
+        // Not while the schema tree's loading popup is up (Ctrl+Enter still
+        // reaches the editor behind it).
+        if (string.IsNullOrEmpty(wql) || _running || _treeBusy) return;
         _running = true;
         _error = null;
         var sw = Stopwatch.StartNew();
@@ -383,11 +398,68 @@
         }
     }
 
-    private Task Run() => RunCore(null);
+    // Run / Ctrl+Enter: the selection, or the statement around the cursor
+    // (statements end with ";"), so a file of several queries can be run one
+    // at a time. Remember where that statement sits, so a column sort or
+    // drill-down later rewrites just it and leaves the rest of the file alone.
+    private async Task Run()
+    {
+        if (Editor is null) { await RunCore(null); return; }
+        var rt = await Editor.GetRunTextAsync();
+        if (string.IsNullOrWhiteSpace(WqlQuery.StripComments(rt.Text).Trim().TrimEnd(';')))
+        {
+            _error = "Nothing to run here — put the cursor in a query (queries end with ;) or select one.";
+            return;
+        }
+        _stmtDoc = await Editor.GetValueAsync();
+        _stmtStart = rt.CodeStart;
+        _stmtEnd = rt.CodeEnd;
+        await RunCore(rt.Text);
+    }
+
+    // Where the last-run statement sits in the editor, and the editor text at
+    // that moment. If the user has edited since, the offsets no longer apply
+    // and rewrites fall back to replacing the whole editor.
+    private string? _stmtDoc;
+    private int _stmtStart;
+    private int _stmtEnd;
+
+    private async Task<bool> StatementStillThereAsync()
+    {
+        if (Editor is null || _stmtDoc is null) return false;
+        var cur = await Editor.GetValueAsync();
+        return cur == _stmtDoc && _stmtStart >= 0 && _stmtEnd <= cur.Length && _stmtStart <= _stmtEnd;
+    }
+
+    // The last-run statement's text (or the whole editor if it can't be found).
+    private async Task<string> CurrentStatementAsync()
+    {
+        if (await StatementStillThereAsync()) return _stmtDoc![_stmtStart.._stmtEnd];
+        return Editor is not null ? await Editor.GetValueAsync() : _query;
+    }
+
+    // Rewrite the last-run statement in place (one undoable edit), or the whole
+    // editor if it can't be found. Keeps tracking the rewritten statement.
+    private async Task SetStatementAsync(string text)
+    {
+        if (await StatementStillThereAsync())
+        {
+            await Editor!.ReplaceRangeAsync(_stmtStart, _stmtEnd, text);
+            _stmtDoc = await Editor.GetValueAsync();
+            _query = _stmtDoc;
+            _stmtEnd = _stmtStart + text.Length;
+            return;
+        }
+        await SetEditorAsync(text);
+        _stmtDoc = Editor is not null ? await Editor.GetValueAsync() : text;
+        _stmtStart = 0;
+        _stmtEnd = text.Length;
+    }
 
     private async Task RunCore(string? explicitWql)
     {
-        var wql = WqlQuery.StripComments(explicitWql ?? _query).Trim();
+        // Comments and the ending ";" are editor-only; WQL gets neither.
+        var wql = WqlQuery.StripComments(explicitWql ?? _query).Trim().TrimEnd(';').TrimEnd();
         if (_mode != QueryMode.Select)
         {
             if (string.IsNullOrEmpty(BoCompanyId))
@@ -442,9 +514,13 @@
 
     private async Task UseSource(string alias)
     {
-        // Export wants the whole object, so build an explicit SELECT of every
-        // field rather than leaving the list for the user to fill in.
-        if (_mode == QueryMode.Export)
+        // A custom BO (and anything in Export mode, which only lists custom BOs)
+        // gets an explicit SELECT of every field — in every mode — rather than
+        // an empty list to fill in. Custom BOs are narrow, and Update / Delete /
+        // Export want the whole record anyway. Delivered BOs can have thousands
+        // of fields, so those still start with an empty select list.
+        var isCustom = !string.IsNullOrEmpty(BoCompanyId) && Wcp.IsCustomBo(alias, BoCompanyId);
+        if (_mode == QueryMode.Export || isCustom)
         {
             await UseSourceForExport(alias);
             return;
@@ -458,7 +534,7 @@
     {
         var fieldList = await AllFieldsListAsync(alias);
         if (fieldList is null) return;   // redirecting to login
-        await SetEditorAsync($"SELECT {fieldList}\nFROM {alias}", focus: true);
+        await InsertStatementAsync($"SELECT {fieldList}\nFROM {alias}", 0);
     }
 
     // Comma-separated list of every field on a data source, workdayID first.
@@ -497,7 +573,7 @@
     {
         var writeMode = _mode != QueryMode.Select;
         var text = writeMode ? $"SELECT workdayID\nFROM {fromClause}" : $"SELECT \nFROM {fromClause}";
-        await SetEditorAsync(text, (1, writeMode ? 17 : 8), focus: true);
+        await InsertStatementAsync(text, writeMode ? 16 : 7);
     }
 
     private async Task DrillTo((string Field, string Id) a)
@@ -507,7 +583,7 @@
         var safeId = Regex.Replace(a.Id, @"[()\s]", "");
         var wql = $"SELECT {cols}\nFROM {_ranSource}\nWHERE {a.Field} in ({safeId})";
         if (!string.IsNullOrEmpty(_executedWql)) _history.Add(_executedWql);
-        await SetEditorAsync(wql);
+        await SetStatementAsync(wql);
         await RunCore(wql);
     }
 
@@ -519,9 +595,9 @@
     // nothing).
     private async Task AppendRef((string Field, string Id) a)
     {
-        var baseWql = Editor is not null ? await Editor.GetValueAsync() : _query;
+        var baseWql = await CurrentStatementAsync();
         var safeId = Regex.Replace(a.Id, @"[()\s]", "");
-        await SetEditorAsync(WqlEdit.AddInFilter(baseWql, a.Field, safeId));
+        await SetStatementAsync(WqlEdit.AddInFilter(baseWql, a.Field, safeId));
     }
 
     private async Task Back()
@@ -529,28 +605,18 @@
         if (_history.Count == 0) return;
         var prev = _history[^1];
         _history.RemoveAt(_history.Count - 1);
-        await SetEditorAsync(prev);
+        await SetStatementAsync(prev);
         await RunCore(prev);
     }
 
     // ── CSV export (whole result set) ────────────────────────────────────
-    private async Task ExportCsv()
+    // Opens the Export dialog straight into a CSV export of the query that's on
+    // screen: no row limit (the toolbar Limit only governs what's shown), a
+    // progress bar while it runs, and it can be cancelled.
+    private void ExportCsv()
     {
-        if (string.IsNullOrEmpty(_executedWql) || _exporting || _running) return;
-        _exporting = true;
-        try
-        {
-            const int maxRows = 100_000;
-            // Pages the full result set (100 per request — the gateway cap — 5 in
-            // flight); the toolbar Limit only governs what's shown on screen.
-            var (cols, allRows) = await Meta.FetchAllRowsAsync(_executedWql, maxRows);
-            var csv = WqlFormat.ToCsv(cols, allRows);
-            var stamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH-mm-ss");
-            await Interop.DownloadCsvAsync($"wql-export-{stamp}.csv", csv);
-        }
-        catch (RedirectingToLoginException) { }
-        catch (Exception e) { _error = e.Message; }
-        finally { _exporting = false; }
+        if (string.IsNullOrEmpty(_executedWql) || _running) return;
+        _csvExportOpen = true;
     }
 
     // ── save / load the editor query to a file ───────────────────────────
@@ -562,7 +628,22 @@
         await Interop.SaveTextAsAsync("query.wql", _query ?? "");
     }
 
-    private Task LoadQuery(string text) => SetEditorAsync(text);
+    // A loaded file is added after the current query rather than replacing the
+    // editor, so several files / queries can be worked on side by side.
+    private Task LoadQuery(string text) => InsertStatementAsync(text, 0);
+
+    // Add a query as a new statement after the one the cursor is in (or fill an
+    // empty editor), with the cursor in it so Run picks it next.
+    private async Task InsertStatementAsync(string text, int cursor)
+    {
+        if (Editor is null)
+        {
+            _query = string.IsNullOrWhiteSpace(_query) ? text : $"{_query.TrimEnd().TrimEnd(';')};\n\n{text}";
+            return;
+        }
+        await Editor.InsertStatementAsync(text, cursor);
+        _query = await Editor.GetValueAsync();
+    }
 
     // ── header-menu actions ──────────────────────────────────────────────
     private async Task ApplyColumnAction((string Column, ColumnAction Action, string? Value) a)
@@ -602,7 +683,7 @@
             default:
                 return;
         }
-        await SetEditorAsync(next);
+        await SetStatementAsync(next);
         await RunCore(next);
     }
 
@@ -741,6 +822,6 @@
         _error = null;
         _elapsed = null;
         _history.Clear();
-        await SetEditorAsync(WqlQuery.ReplaceSelectList(baseWql, fieldList), focus: true);
+        await InsertStatementAsync(WqlQuery.ReplaceSelectList(baseWql, fieldList), 0);
     }
 }

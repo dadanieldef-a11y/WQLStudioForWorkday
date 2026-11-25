@@ -137,6 +137,10 @@ public sealed class DeleteResponse
 {
     public List<DeleteResultRow> Results { get; set; } = new();
     public string? Target { get; set; }
+    // True when the session expired after some batches had already been deleted:
+    // Results then holds the outcome of those batches plus a "not sent" row for
+    // every id that was never sent.
+    public bool SessionExpired { get; set; }
 }
 
 public sealed class BatchResultRow

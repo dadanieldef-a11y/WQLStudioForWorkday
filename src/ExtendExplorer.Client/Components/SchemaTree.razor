@@ -2,14 +2,16 @@
 @inject WqlMetadata Meta
 
 @* Business-object tree: data sources → fields, with a type glyph per field,
-   a filters/prompts entry, and per-source "use". Write modes are scoped to
-   this tenant's custom BOs. Port of components/SchemaTree.tsx. *@
+   a filters/prompts entry, and per-source "use". In Select mode, an
+   All / Custom / Delivered switch narrows the list (when the connection has a
+   BO company ID) and custom BOs carry a badge; write modes are always scoped
+   to this tenant's custom BOs. Port of components/SchemaTree.tsx. *@
 
 <aside class="tree">
     <div class="tree-head">
         <span class="tree-title">Business objects</span>
         <span class="tree-count">
-            @(WriteMode ? Shown.Count.ToString() : (_sources.Count > 0 ? _sources.Count.ToString() : ""))
+            @(WriteMode || _kind != "all" ? Shown.Count.ToString() : (_sources.Count > 0 ? _sources.Count.ToString() : ""))
         </span>
     </div>
     <input class="tree-filter" placeholder="Filter data sources…"
@@ -22,10 +24,25 @@
                 : $"Custom BOs only · {BoCompanyId}")
         </div>
     }
+    else if (CanShowCustom)
+    {
+        @* Narrow the tree to your custom BOs, or to the Workday-delivered ones. *@
+        <div class="tree-kind" role="group" aria-label="Which business objects">
+            <div class="mode-switch">
+                @foreach (var (k, label) in Kinds)
+                {
+                    <button type="button" class="mode-btn@(_kind == k ? " active" : "")"
+                            aria-pressed="@(_kind == k)" @onclick="@(() => _kind = k)">
+                        @(label + (k == "custom" ? $" ({CustomCount:N0})" : k == "delivered" ? $" ({DeliveredCount:N0})" : ""))
+                    </button>
+                }
+            </div>
+        </div>
+    }
     <div class="tree-body">
         @if (_loading)
         {
-            <div class="tree-msg">Loading data sources…</div>
+            <div class="tree-msg">Loading business objects…</div>
         }
         @if (_error is not null)
         {
@@ -33,7 +50,11 @@
         }
         @if (!_loading && _error is null && Shown.Count == 0)
         {
-            <div class="tree-msg">No data sources match “@_filter”.</div>
+            <div class="tree-msg">
+                @(string.IsNullOrEmpty(_filter) && (WriteMode || _kind == "custom")
+                    ? $"No custom business objects found for BO company ID “{BoCompanyId}”."
+                    : $"No data sources match “{_filter}”.")
+            </div>
         }
         @foreach (var ds in Shown)
         {
@@ -52,6 +73,10 @@
                     <button class="ds-toggle" @onclick="@(() => Toggle(ds))" title="@ds.Descriptor">
                         <span class="chev">@(_expanded == ds.Id ? "▾" : "▸")</span>
                         <span class="ds-alias">@ds.Alias</span>
+                        @if (!WriteMode && IsCustom(ds))
+                        {
+                            <span class="ds-custom" title="Custom business object (BO company ID @BoCompanyId)">custom</span>
+                        }
                     </button>
                     <button class="ds-use" title="Start a query from this source"
                             @onclick="@(() => OnUseSource.InvokeAsync(ds.Alias))">
@@ -61,10 +86,6 @@
                 @if (_expanded == ds.Id)
                 {
                     <div class="fields">
-                        @if (_loadingFields == ds.Id)
-                        {
-                            <div class="tree-msg tree-msg-sm">Loading fields…</div>
-                        }
                         @if (dsFilters.Count > 0)
                         {
                             <button class="filters-row"
@@ -110,6 +131,15 @@
         }
     </div>
 
+    @if (_showProgress)
+    {
+        <LoadingModal Title="@_progressTitle"
+                      Subtitle="@_progressSubtitle"
+                      Noun="@_progressNoun"
+                      Loaded="_progressLoaded"
+                      Total="_progressTotal" />
+    }
+
     @if (_dialogSource is not null)
     {
         <PromptDialog Source="_dialogSource"
@@ -126,6 +156,9 @@
     [Parameter] public EventCallback<List<DataSourceDto>> OnSourcesLoaded { get; set; }
     [Parameter] public QueryMode Mode { get; set; } = QueryMode.Select;
     [Parameter] public string? BoCompanyId { get; set; }
+    // Raised true while metadata is loading and false when done, so the
+    // workbench can refuse to run a query meanwhile.
+    [Parameter] public EventCallback<bool> OnBusyChanged { get; set; }
 
     private List<DataSourceDto> _sources = new();
     private string _filter = "";
@@ -141,12 +174,78 @@
     private DataSourceDto? _dialogSource;
     private string _fieldFilter = "";
 
+    // ── progress popup ──
+    // Shown for the start-up load and for field loads. A short delay keeps it
+    // from flashing up for loads that finish almost instantly (small BOs); the
+    // workbench is blocked from running queries for the whole load regardless.
+    private const int PopupDelayMs = 300;
+    private bool _busy;
+    private bool _showProgress;
+    private string _progressTitle = "";
+    private string? _progressSubtitle;
+    private string _progressNoun = "items";
+    private int _progressLoaded;
+    private int? _progressTotal;
+    private CancellationTokenSource? _popupDelay;
+
+    private async Task BeginBusyAsync(string title, string? subtitle, string noun)
+    {
+        _progressTitle = title;
+        _progressSubtitle = subtitle;
+        _progressNoun = noun;
+        _progressLoaded = 0;
+        _progressTotal = null;
+        _showProgress = false;
+        _busy = true;
+        await OnBusyChanged.InvokeAsync(true);
+
+        _popupDelay?.Cancel();
+        var cts = _popupDelay = new CancellationTokenSource();
+        _ = Task.Delay(PopupDelayMs, cts.Token).ContinueWith(t =>
+        {
+            if (t.IsCanceled || !_busy) return;
+            _ = InvokeAsync(() => { if (_busy) { _showProgress = true; StateHasChanged(); } });
+        }, TaskScheduler.Default);
+    }
+
+    private void Progress(int loaded, int? total)
+    {
+        _progressLoaded = loaded;
+        if (total.HasValue) _progressTotal = total;
+        InvokeAsync(StateHasChanged);
+    }
+
+    private async Task EndBusyAsync()
+    {
+        _popupDelay?.Cancel();
+        _busy = false;
+        _showProgress = false;
+        await OnBusyChanged.InvokeAsync(false);
+    }
+
     private bool WriteMode => Mode != QueryMode.Select;
+
+    // all | custom | delivered — the Select-mode switch above the tree.
+    private string _kind = "all";
+    private static readonly (string Key, string Label)[] Kinds =
+        { ("all", "All"), ("custom", "Custom"), ("delivered", "Delivered") };
+
+    // Custom BOs can only be told apart when the connection has a BO company ID.
+    private bool CanShowCustom => !string.IsNullOrWhiteSpace(BoCompanyId);
+
+    // A custom BO's alias carries the tenant's company id: {app}_{companyId}_{resource}.
+    private bool IsCustom(DataSourceDto ds) =>
+        CanShowCustom && Wcp.IsCustomBo(ds.Alias, BoCompanyId!.Trim());
+
+    private int CustomCount => _sources.Count(IsCustom);
+    private int DeliveredCount => _sources.Count - CustomCount;
 
     private List<DataSourceDto> Shown => _sources.Where(s =>
     {
         if (WriteMode && (string.IsNullOrEmpty(BoCompanyId) || !Wcp.IsCustomBo(s.Alias, BoCompanyId)))
             return false;
+        if (!WriteMode && CanShowCustom && _kind == "custom" && !IsCustom(s)) return false;
+        if (!WriteMode && CanShowCustom && _kind == "delivered" && IsCustom(s)) return false;
         return string.IsNullOrEmpty(_filter)
             || s.Alias.ToLowerInvariant().Contains(_filter.ToLowerInvariant())
             || s.Descriptor.ToLowerInvariant().Contains(_filter.ToLowerInvariant());
@@ -154,9 +253,10 @@
 
     protected override async Task OnInitializedAsync()
     {
+        await BeginBusyAsync("Loading business objects", "Fetching the list from Workday", "business objects");
         try
         {
-            _sources = await Meta.FetchDataSourcesAsync();
+            _sources = await Meta.FetchDataSourcesAsync(onProgress: Progress);
             await OnSourcesLoaded.InvokeAsync(_sources); // hand the alias→WID map up to Explorer
         }
         catch (RedirectingToLoginException) { /* navigating away */ }
@@ -167,6 +267,7 @@
         finally
         {
             _loading = false;
+            await EndBusyAsync();
         }
     }
 
@@ -181,27 +282,37 @@
         _expanded = ds.Id;
         if (!_fields.ContainsKey(ds.Id))
         {
+            if (_busy) { _expanded = null; return; }
             _loadingFields = ds.Id;
-            // Fields and filters load together — a prompted source needs both.
-            var fieldsTask = SafeFetchFields(ds.Id);
-            var filtersTask = SafeFetchFilters(ds.Id);
-            await Task.WhenAll(fieldsTask, filtersTask);
-            _loadingFields = null;
+            await BeginBusyAsync("Loading fields", ds.Alias, "fields");
+            try
+            {
+                // Fields and filters load together — a prompted source needs both.
+                var fieldsTask = SafeFetchFields(ds.Id);
+                var filtersTask = SafeFetchFilters(ds.Id);
+                await Task.WhenAll(fieldsTask, filtersTask);
+            }
+            finally
+            {
+                _loadingFields = null;
+                await EndBusyAsync();
+            }
         }
     }
 
     // Load the first batch of fields fast (huge BOs can have thousands); the
-    // rest come via "Load all". Prime the completion cache only once the full
-    // set is in.
+    // rest come via "Load all". The batch is shared with editor completion
+    // straight away (it fetches the same first 2,000 otherwise); "Load all"
+    // replaces it with the full set.
     private async Task SafeFetchFields(string id)
     {
         try
         {
-            var (got, total) = await Meta.FetchFieldsPageAsync(id, 0, InitialFieldLimit);
+            var (got, total) = await Meta.FetchFieldsWithProgressAsync(id, 0, InitialFieldLimit, Progress);
             var sorted = got.OrderBy(f => f.Alias, StringComparer.Ordinal).ToList();
             _fields[id] = sorted;
             _fieldTotal[id] = total;
-            if (sorted.Count >= total) await Meta.PrimeFieldsAsync(id, sorted);
+            await Meta.PrimeFieldsAsync(id, sorted);
         }
         catch (RedirectingToLoginException) { }
         catch (Exception e)
@@ -216,11 +327,12 @@
     {
         var have = _fields.TryGetValue(ds.Id, out var ff) ? ff : new();
         var total = _fieldTotal.TryGetValue(ds.Id, out var tt) ? tt : have.Count;
-        if (have.Count >= total || _loadingMore == ds.Id) return;
+        if (have.Count >= total || _loadingMore == ds.Id || _busy) return;
         _loadingMore = ds.Id;
+        await BeginBusyAsync("Loading all fields", ds.Alias, "remaining fields");
         try
         {
-            var (rest, _) = await Meta.FetchFieldsPageAsync(ds.Id, have.Count, null);
+            var (rest, _) = await Meta.FetchFieldsWithProgressAsync(ds.Id, have.Count, null, Progress);
             var merged = have.Concat(rest).OrderBy(f => f.Alias, StringComparer.Ordinal).ToList();
             _fields[ds.Id] = merged;
             await Meta.PrimeFieldsAsync(ds.Id, merged);
@@ -233,6 +345,7 @@
         finally
         {
             _loadingMore = null;
+            await EndBusyAsync();
         }
     }
 

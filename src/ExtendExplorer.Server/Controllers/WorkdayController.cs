@@ -91,7 +91,7 @@ public sealed class WorkdayController : ControllerBase
         {
             return StatusCode(401, new { error = "session_expired" });
         }
-        catch (Exception e)
+        catch (Exception e) when (!HttpContext.RequestAborted.IsCancellationRequested)
         {
             _log.LogError(e, "WQL proxy error");
             return StatusCode(502, new { error = "upstream_error" });
@@ -102,7 +102,7 @@ public sealed class WorkdayController : ControllerBase
     // GET /api/workday/datasources
     // ─────────────────────────────────────────────────────────────────────
     [HttpGet("datasources")]
-    public async Task<IActionResult> DataSources()
+    public async Task<IActionResult> DataSources([FromQuery] int? offset, [FromQuery] int? limit, [FromQuery] int? total)
     {
         var s = _store.GetSession();
         if (string.IsNullOrEmpty(s.Token) || string.IsNullOrEmpty(s.WqlBase)) return NotAuthed();
@@ -110,8 +110,14 @@ public sealed class WorkdayController : ControllerBase
         // The WCP API Gateway caps `limit` at 100 per request (the 10,000 in the
         // WQL docs applies to the tenanted host), so paging is 100 at a time with
         // 5 requests in flight.
+        //
+        // Optional window: ?offset=&limit= returns just that slice (in Workday's
+        // order) plus the real total, so the browser can load the list in steps
+        // and show progress. With no params the whole list comes back sorted.
         const int pageSize = 100;
         const int concurrency = 5;
+        var startOffset = Math.Max(0, offset ?? 0);
+        int? windowLimit = limit is int l && l >= 0 ? l : null;
 
         // One upstream page → (rows, total) or an upstream error to pass through.
         async Task<(List<DataSourceDto> Rows, int Total, int? ErrStatus, string? ErrText)> FetchPage(int off)
@@ -136,15 +142,27 @@ public sealed class WorkdayController : ControllerBase
         try
         {
             var all = new List<DataSourceDto>();
-            // First page reports the real total; the remaining pages are fetched
-            // in parallel batches (5 at a time) instead of one-at-a-time.
-            var first = await FetchPage(0);
-            if (first.ErrStatus is int es) return Upstream(es, first.ErrText);
-            all.AddRange(first.Rows);
-
-            var total = first.Total;
             var offsets = new List<int>();
-            for (var o = pageSize; o < total; o += pageSize) offsets.Add(o);
+            int realTotal;
+            if (total is int known && known >= 0 && windowLimit is not null)
+            {
+                // The caller already knows the total (from its first step), so
+                // every page of this window can be requested at once — no solo
+                // first page needed.
+                realTotal = known;
+                for (var o = startOffset; o < Math.Min(startOffset + windowLimit.Value, known); o += pageSize) offsets.Add(o);
+            }
+            else
+            {
+                // First page reports the real total; the remaining pages are
+                // fetched in parallel batches (5 at a time).
+                var first = await FetchPage(startOffset);
+                if (first.ErrStatus is int es) return Upstream(es, first.ErrText);
+                all.AddRange(first.Rows);
+                realTotal = first.Total;
+                var end = windowLimit is int wl ? Math.Min(startOffset + wl, realTotal) : realTotal;
+                for (var o = startOffset + pageSize; o < end; o += pageSize) offsets.Add(o);
+            }
 
             for (var i = 0; i < offsets.Count; i += concurrency)
             {
@@ -157,11 +175,17 @@ public sealed class WorkdayController : ControllerBase
                 }
             }
 
-            all.Sort((a, b) => string.CompareOrdinal(a.Alias, b.Alias));
-            return Ok(new DataSourcesResponse { DataSources = all, Total = all.Count });
+            if (windowLimit is null && startOffset == 0)
+            {
+                all.Sort((a, b) => string.CompareOrdinal(a.Alias, b.Alias));
+                return Ok(new DataSourcesResponse { DataSources = all, Total = all.Count });
+            }
+            // Windowed: native order (the client sorts the accumulated list) and
+            // Workday's total, so the client knows how many steps remain.
+            return Ok(new DataSourcesResponse { DataSources = all, Total = realTotal });
         }
         catch (NotAuthenticatedException) { return StatusCode(401, new { error = "session_expired" }); }
-        catch (Exception e) { _log.LogError(e, "dataSources proxy error"); return StatusCode(502, new { error = "upstream_error" }); }
+        catch (Exception e) when (!HttpContext.RequestAborted.IsCancellationRequested) { _log.LogError(e, "dataSources proxy error"); return StatusCode(502, new { error = "upstream_error" }); }
     }
 
     private static DataSourceDto? NormalizeDataSource(JsonElement raw)
@@ -178,7 +202,7 @@ public sealed class WorkdayController : ControllerBase
     // GET /api/workday/datasources/{id}/fields
     // ─────────────────────────────────────────────────────────────────────
     [HttpGet("datasources/{id}/fields")]
-    public async Task<IActionResult> Fields(string id, [FromQuery] int? offset, [FromQuery] int? limit)
+    public async Task<IActionResult> Fields(string id, [FromQuery] int? offset, [FromQuery] int? limit, [FromQuery] int? total)
     {
         var s = _store.GetSession();
         if (string.IsNullOrEmpty(s.Token) || string.IsNullOrEmpty(s.WqlBase)) return NotAuthed();
@@ -218,16 +242,25 @@ public sealed class WorkdayController : ControllerBase
         try
         {
             var all = new List<FieldDto>();
-            // First page at the start offset reports the real total.
-            var first = await FetchPage(startOffset);
-            if (first.ErrStatus is int es) return Upstream(es, first.ErrText);
-            all.AddRange(first.Rows);
-
-            var total = first.Total;
-            var end = windowLimit is int wl ? Math.Min(startOffset + wl, total) : total;
-
             var offsets = new List<int>();
-            for (var o = startOffset + pageSize; o < end; o += pageSize) offsets.Add(o);
+            int realTotal;
+            if (total is int known && known >= 0 && windowLimit is not null)
+            {
+                // The caller already knows the total (from its first step), so
+                // every page of this window can be requested at once.
+                realTotal = known;
+                for (var o = startOffset; o < Math.Min(startOffset + windowLimit.Value, known); o += pageSize) offsets.Add(o);
+            }
+            else
+            {
+                // First page at the start offset reports the real total.
+                var first = await FetchPage(startOffset);
+                if (first.ErrStatus is int es) return Upstream(es, first.ErrText);
+                all.AddRange(first.Rows);
+                realTotal = first.Total;
+                var end = windowLimit is int wl ? Math.Min(startOffset + wl, realTotal) : realTotal;
+                for (var o = startOffset + pageSize; o < end; o += pageSize) offsets.Add(o);
+            }
 
             for (var i = 0; i < offsets.Count; i += concurrency)
             {
@@ -245,10 +278,10 @@ public sealed class WorkdayController : ControllerBase
             // order and the client sorts the accumulated set.
             if (startOffset == 0 && windowLimit is null)
                 all.Sort((a, b) => string.CompareOrdinal(a.Alias, b.Alias));
-            return Ok(new FieldsResponse { Fields = all, Total = total });
+            return Ok(new FieldsResponse { Fields = all, Total = realTotal });
         }
         catch (NotAuthenticatedException) { return StatusCode(401, new { error = "session_expired" }); }
-        catch (Exception e) { _log.LogError(e, "fields proxy error"); return StatusCode(502, new { error = "upstream_error" }); }
+        catch (Exception e) when (!HttpContext.RequestAborted.IsCancellationRequested) { _log.LogError(e, "fields proxy error"); return StatusCode(502, new { error = "upstream_error" }); }
     }
 
     private static FieldDto? NormalizeField(JsonElement raw)
@@ -295,7 +328,7 @@ public sealed class WorkdayController : ControllerBase
             return Ok(new FiltersResponse { Filters = filters, Total = filters.Count });
         }
         catch (NotAuthenticatedException) { return StatusCode(401, new { error = "session_expired" }); }
-        catch (Exception e) { _log.LogError(e, "filters proxy error"); return StatusCode(502, new { error = "upstream_error" }); }
+        catch (Exception e) when (!HttpContext.RequestAborted.IsCancellationRequested) { _log.LogError(e, "filters proxy error"); return StatusCode(502, new { error = "upstream_error" }); }
     }
 
     private static PromptDto? NormalizePrompt(JsonElement raw)
@@ -379,7 +412,7 @@ public sealed class WorkdayController : ControllerBase
             };
         }
         catch (NotAuthenticatedException) { return StatusCode(401, new { error = "session_expired" }); }
-        catch (Exception e) { _log.LogError(e, "[record] upstream error"); return StatusCode(502, new { error = "upstream_error" }); }
+        catch (Exception e) when (!HttpContext.RequestAborted.IsCancellationRequested) { _log.LogError(e, "[record] upstream error"); return StatusCode(502, new { error = "upstream_error" }); }
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -419,7 +452,7 @@ public sealed class WorkdayController : ControllerBase
             };
         }
         catch (NotAuthenticatedException) { return StatusCode(401, new { error = "session_expired" }); }
-        catch (Exception e) { _log.LogError(e, "[insert] upstream error"); return StatusCode(502, new { error = "upstream_error" }); }
+        catch (Exception e) when (!HttpContext.RequestAborted.IsCancellationRequested) { _log.LogError(e, "[insert] upstream error"); return StatusCode(502, new { error = "upstream_error" }); }
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -477,7 +510,7 @@ public sealed class WorkdayController : ControllerBase
         {
             return StatusCode(401, new { error = "not_authenticated" });
         }
-        catch (Exception e)
+        catch (Exception e) when (!HttpContext.RequestAborted.IsCancellationRequested)
         {
             _log.LogError(e, "[insert-bulk] upstream error");
             return StatusCode(502, new { error = "upstream_error", results, okRows, failRows });
@@ -671,7 +704,7 @@ public sealed class WorkdayController : ControllerBase
             };
         }
         catch (NotAuthenticatedException) { return StatusCode(401, new { error = "session_expired" }); }
-        catch (Exception e) { _log.LogError(e, "[update] upstream error"); return StatusCode(502, new { error = "upstream_error" }); }
+        catch (Exception e) when (!HttpContext.RequestAborted.IsCancellationRequested) { _log.LogError(e, "[update] upstream error"); return StatusCode(502, new { error = "upstream_error" }); }
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -748,7 +781,7 @@ public sealed class WorkdayController : ControllerBase
             {
                 return StatusCode(401, new { error = "not_authenticated" });
             }
-            catch (Exception e)
+            catch (Exception e) when (!HttpContext.RequestAborted.IsCancellationRequested)
             {
                 batches.Add(new BatchResultRow { Index = index, Count = chunk.Count, Ok = false, Status = 0, Error = e.Message });
                 failRows += chunk.Count;
@@ -822,10 +855,20 @@ public sealed class WorkdayController : ControllerBase
             }
             catch (NotAuthenticatedException)
             {
-                // Token is dead — stop and let the client bounce to re-login.
-                return StatusCode(401, new { error = "not_authenticated" });
+                // Token is dead. If nothing has been sent yet, a plain 401 lets the
+                // client bounce to re-login.
+                if (start == 0) return StatusCode(401, new { error = "not_authenticated" });
+
+                // Otherwise earlier batches were already deleted: return their
+                // results rather than losing them, and mark every id from this
+                // batch on as not sent (a 401 means this batch was rejected).
+                results.AddRange(valid.Skip(start).Select(id => new DeleteResultRow
+                {
+                    Id = id, Ok = false, Status = 401, Error = "not sent — session expired",
+                }));
+                return Ok(new DeleteResponse { Results = results, Target = bulkUrl, SessionExpired = true });
             }
-            catch (Exception e)
+            catch (Exception e) when (!HttpContext.RequestAborted.IsCancellationRequested)
             {
                 results.AddRange(chunk.Select(id => new DeleteResultRow
                 {

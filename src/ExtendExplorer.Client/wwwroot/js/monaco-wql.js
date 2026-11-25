@@ -164,8 +164,15 @@
   }
 
   // ── metadata for completions (its own tiny cache over /api/*) ───────────
+  let monaco_ = null; // set once Monaco has loaded (used by the window.wqlEditor API)
   let dsCache = null;
+  let dsInFlight = null;
   const fieldCache = Object.create(null);
+  const fieldInFlight = Object.create(null);
+  // Same first batch the schema tree loads. Huge BOs (allWorkers has thousands
+  // of fields) are 100 fields per Workday call, so fetching everything for
+  // completion would mean dozens of slow calls on every new FROM source.
+  const FIELD_LIMIT = 2000;
 
   // The schema tree loads data sources + fields through the C# app; it primes
   // these caches via window.wqlEditor.setDataSources/setFields, so completion is
@@ -177,24 +184,39 @@
     return fetch(url, { headers: { Accept: "application/json" } });
   }
 
-  async function fetchDataSources() {
-    if (dsCache) return dsCache;
-    const res = await fetchJson("/api/workday/datasources");
-    if (!res.ok) throw new Error("datasources " + res.status);
-    const json = await res.json();
-    dsCache = json.dataSources || [];
-    return dsCache;
+  // Each keystroke can ask for completions, so a fetch already in flight is
+  // shared rather than started again. A failed fetch is forgotten so the next
+  // request retries it.
+  function fetchDataSources() {
+    if (dsCache) return Promise.resolve(dsCache);
+    if (!dsInFlight) {
+      dsInFlight = (async () => {
+        const res = await fetchJson("/api/workday/datasources");
+        if (!res.ok) throw new Error("datasources " + res.status);
+        const json = await res.json();
+        dsCache = json.dataSources || [];
+        return dsCache;
+      })().finally(() => { dsInFlight = null; });
+    }
+    return dsInFlight;
   }
 
-  async function fetchFields(id) {
-    if (fieldCache[id]) return fieldCache[id];
-    const res = await fetchJson(
-      "/api/workday/datasources/" + encodeURIComponent(id) + "/fields",
-    );
-    if (!res.ok) throw new Error("fields " + res.status);
-    const json = await res.json();
-    fieldCache[id] = json.fields || [];
-    return fieldCache[id];
+  function fetchFields(id) {
+    if (fieldCache[id]) return Promise.resolve(fieldCache[id]);
+    if (!fieldInFlight[id]) {
+      fieldInFlight[id] = (async () => {
+        const res = await fetchJson(
+          "/api/workday/datasources/" + encodeURIComponent(id) +
+            "/fields?offset=0&limit=" + FIELD_LIMIT,
+        );
+        if (!res.ok) throw new Error("fields " + res.status);
+        const json = await res.json();
+        // The tree may have primed a fuller list while this was in flight.
+        if (!fieldCache[id]) fieldCache[id] = json.fields || [];
+        return fieldCache[id];
+      })().finally(() => { delete fieldInFlight[id]; });
+    }
+    return fieldInFlight[id];
   }
 
   function aliasesInFrom(text) {
@@ -203,6 +225,193 @@
     let m;
     while ((m = re.exec(text))) found.add(m[1]);
     return [...found];
+  }
+
+  // ── statements: the one under the cursor is what Run executes ──────────
+  // A file can hold several queries, each ended by ";". A ";" inside a
+  // 'string', a "quoted name" or a -- / /* */ comment doesn't end anything.
+  // Returns [{ start, end }] offsets; `end` is just after the ";" (or the end
+  // of the text), so the segments cover the whole text with no gaps.
+  function splitStatements(text) {
+    const segs = [];
+    let start = 0;
+    let i = 0;
+    const n = text.length;
+    while (i < n) {
+      const c = text[i];
+      const next = i + 1 < n ? text[i + 1] : "";
+      if (c === "'" || c === '"') {
+        // quoted: '' / "" inside is an escaped quote
+        i++;
+        while (i < n) {
+          if (text[i] === c) {
+            if (i + 1 < n && text[i + 1] === c) { i += 2; continue; }
+            break;
+          }
+          i++;
+        }
+        i++;
+        continue;
+      }
+      if (c === "-" && next === "-") {
+        while (i < n && text[i] !== "\n") i++;
+        continue;
+      }
+      if (c === "/" && next === "*") {
+        i += 2;
+        while (i < n && !(text[i] === "*" && text[i + 1] === "/")) i++;
+        i += 2;
+        continue;
+      }
+      if (c === ";") {
+        segs.push({ start: start, end: i + 1 });
+        start = i + 1;
+      }
+      i++;
+    }
+    if (start < n || segs.length === 0) segs.push({ start: start, end: n });
+    return segs;
+  }
+
+  // The query text within a segment: past leading whitespace and comments
+  // (a header comment belongs to the query below it), and before the ending
+  // ";" and trailing whitespace. codeStart === codeEnd means "nothing to run".
+  function codeBounds(text, seg) {
+    let s = seg.start;
+    while (s < seg.end) {
+      if (/\s/.test(text[s])) { s++; continue; }
+      if (text[s] === "-" && text[s + 1] === "-") {
+        while (s < seg.end && text[s] !== "\n") s++;
+        continue;
+      }
+      if (text[s] === "/" && text[s + 1] === "*") {
+        const close = text.indexOf("*/", s + 2);
+        s = close < 0 || close + 2 > seg.end ? seg.end : close + 2;
+        continue;
+      }
+      break;
+    }
+    // End just after the last character of query text, ignoring the ending
+    // ";" and any comments after the query (so a trailing "-- note" stays out).
+    let e = s;
+    let i = s;
+    const stop = text[seg.end - 1] === ";" ? seg.end - 1 : seg.end;
+    while (i < stop) {
+      const c = text[i];
+      if (c === "'" || c === '"') {
+        i++;
+        while (i < stop) {
+          if (text[i] === c) {
+            if (text[i + 1] === c) { i += 2; continue; }
+            break;
+          }
+          i++;
+        }
+        i++;
+        e = Math.min(i, stop);
+        continue;
+      }
+      if (c === "-" && text[i + 1] === "-") {
+        while (i < stop && text[i] !== "\n") i++;
+        continue;
+      }
+      if (c === "/" && text[i + 1] === "*") {
+        const close = text.indexOf("*/", i + 2);
+        i = close < 0 || close + 2 > stop ? stop : close + 2;
+        continue;
+      }
+      if (!/\s/.test(c)) e = i + 1;
+      i++;
+    }
+    return { codeStart: s, codeEnd: Math.max(s, e) };
+  }
+
+  // Which statement the cursor means:
+  //  - the segment containing it (so a header comment runs the query below);
+  //  - just after a ";", or on a comment after it on the same line, the
+  //    query that ";" ended;
+  //  - on blank space with no query (e.g. after the last one), the nearest
+  //    query before it, else after it.
+  function statementAt(text, offset) {
+    const segs = splitStatements(text).map(function (g) {
+      return Object.assign(g, codeBounds(text, g));
+    });
+    let k = segs.findIndex(function (g) { return offset >= g.start && offset < g.end; });
+    if (k < 0) k = segs.length - 1;
+    const lead = text.slice(segs[k].start, offset);
+    // Still on the ";" line, with only spaces or a trailing comment before the
+    // cursor: that belongs to the query the ";" ended.
+    // (Not when a query follows the cursor on that line: "a; |SELECT 2" runs SELECT 2.)
+    const eol = text.indexOf("\n", offset);
+    const rest = text.slice(offset, eol < 0 ? text.length : eol);
+    // A cursor touching the ";" always means the query it ends.
+    if (k > 0 && text[segs[k].start - 1] === ";"
+        && (offset === segs[k].start
+            || (!lead.includes("\n")
+                && /^[ \t]*(--.*|\/\*.*)?$/.test(lead)
+                && (/^[ \t]*(--.*|\/\*.*)?$/.test(rest) || /(--|\/\*)/.test(lead))))) k--;
+    const has = function (g) { return g.codeEnd > g.codeStart; };
+    if (!has(segs[k])) {
+      let j = k - 1;
+      while (j >= 0 && !has(segs[j])) j--;
+      if (j < 0) { j = k + 1; while (j < segs.length && !has(segs[j])) j++; }
+      if (j >= 0 && j < segs.length) k = j;
+    }
+    return segs[k];
+  }
+
+  // Text to add as new statement(s): trimmed, and ended with ";" if its last
+  // statement has none (added right after the query, so a trailing comment
+  // can't swallow it).
+  function terminate(text) {
+    let t = (text || "").replace(/\s+$/, "");
+    const segs = splitStatements(t).map(function (g) { return Object.assign(g, codeBounds(t, g)); });
+    const last = segs[segs.length - 1];
+    if (last && last.codeEnd > last.codeStart && t[last.end - 1] !== ";")
+      t = t.slice(0, last.codeEnd) + ";" + t.slice(last.codeEnd);
+    return t;
+  }
+
+  // Where a new statement goes: after the statement the cursor is in — after its
+  // ";" and any comment on that line — adding the ";" (at semiAt) if it has
+  // none. Returns { at, replace, prefix, semiAt }: replace `replace` characters
+  // at offset `at` (spaces before a query sharing the line) with
+  // `prefix + newText`, and insert ";" at semiAt (-1 = not needed).
+  function insertionPoint(text, offset) {
+    const g = statementAt(text, offset);
+    if (!g || g.codeEnd <= g.codeStart)
+      return { at: text.length, replace: 0, prefix: text.trim() ? "\n\n" : "", semiAt: -1 };
+    const semiAt = text[g.end - 1] === ";" ? -1 : g.codeEnd;
+    const from = semiAt < 0 ? g.end : g.codeEnd;
+    const eol = text.indexOf("\n", from);
+    const lineEnd = eol < 0 ? text.length : eol;
+    const rest = text.slice(from, lineEnd);
+    // Only spaces or a comment left on the line: go to the end of the line.
+    if (/^[ \t]*(--.*|\/\*.*\*\/[ \t]*)?$/.test(rest))
+      return { at: lineEnd, replace: 0, prefix: "\n\n", semiAt: semiAt };
+    // Another query follows on the same line: insert before it, eating the
+    // spaces in between.
+    const ws = /^[ \t]*/.exec(rest)[0].length;
+    return { at: from, replace: ws, prefix: "\n\n", semiAt: semiAt };
+  }
+
+  // Blank line between an inserted statement and whatever follows it.
+  function separatorAfter(text, at) {
+    const after = text.slice(at);
+    if (/^\S/.test(after)) return "\n\n";
+    if (!after.trim()) return "";
+    if (after.startsWith("\n\n") || after.startsWith("\r\n\r\n")) return "";
+    if (after.startsWith("\n") || after.startsWith("\r\n")) return "\n";
+    return "\n\n";
+  }
+
+  // Briefly light up the text that's about to run.
+  function flashRange(editor, monaco, range) {
+    if (!range || range.isEmpty()) return;
+    const decos = editor.deltaDecorations([], [
+      { range: range, options: { className: "wql-run-flash", stickiness: 1 } },
+    ]);
+    setTimeout(function () { try { editor.deltaDecorations(decos, []); } catch { /* disposed */ } }, 700);
   }
 
   // ── completion provider (port of createCompletionProvider) ──────────────
@@ -329,6 +538,7 @@
     // plain <textarea>.
     create: async function (elementId, initialValue, dotnetRef) {
       const monaco = await loadMonaco();
+      monaco_ = monaco;
       registerWql(monaco);
       createCompletionProvider(monaco);
       const el = document.getElementById(elementId);
@@ -372,6 +582,77 @@
     getValue: function (elementId) {
       const e = editors[elementId];
       return e ? e.getValue() : "";
+    },
+    // What Run should execute: the selection if there is one, otherwise the
+    // statement around the cursor. Returns the text, plus the offsets of the
+    // part a column sort / drill-down may later rewrite in place (so other
+    // statements in the editor are left alone). The chosen text flashes.
+    getRunText: function (elementId) {
+      const e = editors[elementId];
+      if (!e) return null;
+      const model = e.getModel();
+      const text = model.getValue();
+      const sel = e.getSelection();
+      if (sel && !sel.isEmpty()) {
+        const a = model.getOffsetAt(sel.getStartPosition());
+        const b = model.getOffsetAt(sel.getEndPosition());
+        flashRange(e, monaco_, sel);
+        return { text: text.slice(a, b), codeStart: a, codeEnd: b };
+      }
+      const offset = model.getOffsetAt(e.getPosition());
+      const g = statementAt(text, offset);
+      if (!g || g.codeEnd <= g.codeStart) return { text: "", codeStart: 0, codeEnd: 0 };
+      const range = monaco_.Range.fromPositions(
+        model.getPositionAt(g.codeStart), model.getPositionAt(g.codeEnd));
+      flashRange(e, monaco_, range);
+      return { text: text.slice(g.start, g.end), codeStart: g.codeStart, codeEnd: g.codeEnd };
+    },
+    // Add text as a new statement after the one the cursor is in (or fill the
+    // editor if it's empty), as one undoable edit. Puts the cursor `cursor`
+    // characters into the new text, scrolls it into view and returns its offset.
+    insertStatement: function (elementId, value, cursor) {
+      const e = editors[elementId];
+      if (!e) return -1;
+      const model = e.getModel();
+      const doc = model.getValue();
+      const add = terminate(value);
+      const edits = [];
+      let start;
+      if (!doc.trim()) {
+        edits.push({ range: model.getFullModelRange(), text: add });
+        start = 0;
+      } else {
+        const p = insertionPoint(doc, model.getOffsetAt(e.getPosition()));
+        const suffix = separatorAfter(doc, p.at + p.replace);
+        if (p.semiAt >= 0) {
+          const sp = model.getPositionAt(p.semiAt);
+          edits.push({ range: monaco_.Range.fromPositions(sp, sp), text: ";" });
+        }
+        edits.push({
+          range: monaco_.Range.fromPositions(model.getPositionAt(p.at), model.getPositionAt(p.at + p.replace)),
+          text: p.prefix + add + suffix,
+        });
+        // Offsets after the edits: the ";" (if any) comes before the insertion.
+        start = p.at + (p.semiAt >= 0 ? 1 : 0) + p.prefix.length;
+      }
+      e.pushUndoStop();
+      e.executeEdits("insert-statement", edits);
+      e.pushUndoStop();
+      const pos = model.getPositionAt(start + Math.max(0, Math.min(cursor || 0, add.length)));
+      e.setPosition(pos);
+      e.revealPositionInCenterIfOutsideViewport(pos);
+      e.focus();
+      return start;
+    },
+    // Replace text between two offsets as one undoable edit (Ctrl+Z restores).
+    replaceRange: function (elementId, start, end, value) {
+      const e = editors[elementId];
+      if (!e) return;
+      const model = e.getModel();
+      const range = monaco_.Range.fromPositions(model.getPositionAt(start), model.getPositionAt(end));
+      e.pushUndoStop();
+      e.executeEdits("statement-edit", [{ range: range, text: value || "", forceMoveMarkers: true }]);
+      e.pushUndoStop();
     },
     setValue: function (elementId, value) {
       const e = editors[elementId];

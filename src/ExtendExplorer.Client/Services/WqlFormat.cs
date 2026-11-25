@@ -91,20 +91,14 @@ public static class WqlFormat
 
     private static string CsvCell(JsonElement? v) => CsvEscape(DisplayValue(v));
 
-    public static string ToCsv(
-        IReadOnlyList<string> columns,
-        IReadOnlyList<Dictionary<string, JsonElement>> rows)
-    {
-        var sb = new StringBuilder();
-        sb.Append(string.Join(",", columns.Select(CsvEscape)));
-        foreach (var r in rows)
-        {
-            sb.Append("\r\n");
-            sb.Append(string.Join(",", columns.Select(c =>
-                CsvCell(r.TryGetValue(c, out var el) ? el : (JsonElement?)null))));
-        }
-        return sb.ToString();
-    }
+    // CSV is written a line at a time so an export can be streamed to a file:
+    // the header line, then one line per row (no trailing line break on either).
+    public static string CsvHeaderLine(IReadOnlyList<string> columns) =>
+        string.Join(",", columns.Select(CsvEscape));
+
+    public static string CsvLine(IReadOnlyList<string> columns, Dictionary<string, JsonElement> row) =>
+        string.Join(",", columns.Select(c =>
+            CsvCell(row.TryGetValue(c, out var el) ? el : (JsonElement?)null)));
 
     // ── FROM-clause prompt formatting ───────────────────────────
     // WQL prompt values are typed: dates and text are quoted; instances (WIDs),

@@ -407,6 +407,8 @@
         <h2>The Explorer</h2>
         <p>Once connected, the workbench has three regions: the <strong>schema tree</strong> on the left, the <strong>query editor</strong> in the middle, and the <strong>results</strong> below it. The toolbar across the top switches modes and runs queries.</p>
         <figure class="shot" data-src="guide/explorer-overview.png" data-cap="The Explorer layout: schema tree, toolbar, editor, and results."></figure>
+        <h3>Loading the schema</h3>
+        <p>When the app opens, a <strong>Loading business objects</strong> popup shows how many have arrived (for example <em>1,500 of 4,200 business objects (35%)</em>). The same popup, <strong>Loading fields</strong>, appears when you expand a large business object, or choose <em>load all</em>. While it's up, nothing else can be clicked and queries won't run, including <kbd>Ctrl</kbd> + <kbd>Enter</kbd>, so a query can't compete with the load. Small loads finish before the popup has time to appear.</p>
 
         <h3>Resizing the panes</h3>
         <ul>
@@ -419,10 +421,10 @@
         <figure class="shot" data-src="guide/explorer-toolbar.png" data-cap="The toolbar: mode switch, Run, Limit, Export CSV, Save/Load query, and status."></figure>
         <ul>
           <li><strong>Mode switch</strong>, <span class="pill">Select</span> <span class="pill">Insert</span> <span class="pill">Update</span> <span class="pill">Delete</span> <span class="pill">Export/Import</span>.</li>
-          <li><strong>Run 🟢</strong>, runs the query.</li>
+          <li><strong>Run 🟢</strong>, runs the query the cursor is in (or the selected text), see <a href="#several-queries">several queries in one editor</a>.</li>
           <li><strong>Limit</strong>, rows per page (10 / 25 / 50 / 100). 100 is the API's maximum page size; to get more rows out in one go, use <strong>Export CSV</strong> or <a href="#export-import">Export/Import</a> mode, which page through everything for you.</li>
-          <li><strong>Export CSV</strong>, exports the full result set (not just the current page).</li>
-          <li><strong>Save query / Load query</strong>, save the editor’s WQL to a <code>.wql</code> file, or load one back.</li>
+          <li><strong>Export CSV</strong>, exports the full result set (not just the current page): it asks where to save, then shows a progress bar you can cancel. There's no row limit.</li>
+          <li><strong>Save query / Load query</strong>, save the editor’s WQL to a <code>.wql</code> file, or load one. A loaded file is added after the query the cursor is in, so it doesn't replace what you have.</li>
           <li><strong>Status</strong>, rows returned and how long the query took.</li>
         </ul>
       </section>
@@ -434,7 +436,8 @@
         <h3>Browsing the schema tree</h3>
         <p>The tree lists queryable data sources. Filter it with the search box, then:</p>
         <ul>
-          <li>Click <strong>use</strong> on a source to start a query from it.</li>
+          <li>Use <strong>All / Custom / Delivered</strong> above the list to show everything, only your custom BOs, or only the Workday-delivered ones. Each button shows its count, and with <em>All</em> selected, custom BOs carry a small <span class="pill">custom</span> tag. The switch appears when the connection has a <code>BO Company ID</code>; write modes always show just your custom BOs.</li>
+          <li>Click <strong>use</strong> on a source to start a query from it. For one of <strong>your custom BOs</strong>, the query selects <em>every field</em> (<code>workdayID</code> first), in any mode; for a delivered BO, which can have thousands of fields, the select list starts empty for you to fill in. The new query is added after the one the cursor is in, so nothing you've written is replaced.</li>
           <li>Expand a source to see its <strong>fields</strong>, each with a type glyph (<code>→</code> reference, <code>⋮</code> multi-instance, <code>#</code> numeric, <code>◷</code> date, <code>◩</code> boolean, <code>T</code> text).</li>
           <li>Click a <strong>field</strong> to insert its alias at the cursor.</li>
           <li>Sources with a <code>⚙ Filters &amp; prompts</code> entry let you build a prompted FROM clause.</li>
@@ -446,15 +449,33 @@
         <ol>
           <li>If the source has more than one <strong>data source filter</strong>, choose one from the dropdown. Its description appears underneath.</li>
           <li>Fill in the <strong>prompts</strong>. Each shows its type; required ones are marked <code>*</code>. Booleans get a true/false dropdown, dates a date picker, and instance prompts expect a WID.</li>
-          <li>Click <strong>Build query</strong> (disabled until every required prompt is filled). The editor is filled with a query using that <code>FROM</code> clause, ready for you to add fields.</li>
+          <li>Click <strong>Build query</strong> (disabled until every required prompt is filled). A new query using that <code>FROM</code> clause is added to the editor, ready for you to add fields.</li>
         </ol>
-        <div class="tip"><strong>Big BOs.</strong> Very wide objects (like <code>allWorkers</code>) load their first couple thousand fields immediately; use <strong>“Showing N of M, load all”</strong> to pull the rest.</div>
+        <div class="tip"><strong>Big BOs.</strong> Very wide objects (like <code>allWorkers</code>) load their first 2,000 fields immediately; use <strong>“Showing N of M, load all”</strong> to pull the rest. Autocomplete uses the same 2,000 fields, and the full list once you've loaded all.</div>
 
         <h3>Writing WQL</h3>
         <p>The editor has WQL syntax highlighting and schema-aware autocomplete, press <kbd>Ctrl</kbd> + <kbd>Space</kbd> to see data sources, fields, and keywords. Run with <strong>Run 🟢</strong>.</p>
         <figure class="shot" data-src="guide/select-autocomplete.png" data-cap="Autocomplete suggesting fields for the source in the FROM clause."></figure>
         <pre><code>SELECT workdayID, legalName, primaryWorkEmail
 FROM allWorkers</code></pre>
+
+        <h3 id="several-queries">Several queries in one editor</h3>
+        <p>The editor can hold any number of queries, each ending with a <code>;</code>, so a saved <code>.wql</code> file can be a library of queries. <strong>Run</strong> and <kbd>Ctrl</kbd> + <kbd>Enter</kbd> run only the query the cursor is in:</p>
+        <ul>
+          <li><strong>Select text</strong> to run exactly that, for example part of a query.</li>
+          <li>With the cursor on a query's <strong>header comment</strong>, the query below it runs. Just after a <code>;</code>, or on a comment after it on the same line, the query that <code>;</code> ends runs.</li>
+          <li>On blank lines after the last query, the last query runs.</li>
+          <li>A <code>;</code> inside <code>'text'</code>, a <code>"quoted name"</code> or a comment doesn't end a query.</li>
+          <li>The query that's about to run <strong>lights up briefly</strong>, so you can see which one ran. Its ending <code>;</code> is removed before it's sent.</li>
+        </ul>
+        <pre><code>-- Active workers
+SELECT workdayID, fullName
+FROM allWorkers;
+
+-- Locations
+SELECT location
+FROM allLocations;</code></pre>
+        <p>If the cursor is somewhere with no query (only comments or blank text), you'll see <em>“Nothing to run here”</em>.</p>
 
         <h3>Comments</h3>
         <p>The editor supports SQL-style comments, which are stripped out before the query is sent to Workday, handy for toggling fields or clauses on and off while you iterate:</p>
@@ -471,6 +492,7 @@ FROM allWorkers</code></pre>
           <li><strong>Multi-instance cells</strong>, click to expand the list of items.</li>
           <li><strong>Paging</strong>, <strong>Prev / Next</strong> move through pages at your chosen Limit.</li>
         </ul>
+        <p>Drilling in, <kbd>Ctrl</kbd>-clicking a chip and <strong>↩ Back</strong> rewrite only the query that ran; any other queries in the editor are left alone. Each change can be undone with <kbd>Ctrl</kbd> + <kbd>Z</kbd>.</p>
         <figure class="shot" data-src="guide/select-drilldown.png" data-cap="Drilling into a referenced instance from a chip."></figure>
 
         <h3>Sorting &amp; filtering columns</h3>
@@ -482,22 +504,23 @@ FROM allWorkers</code></pre>
           <li><strong>Numeric &amp; date</strong>, a comparison (<code>=</code>, <code>&gt;</code>, <code>&gt;=</code>, <code>&lt;</code>, <code>&lt;=</code>) with a value, plus blank / not blank.</li>
           <li><strong>Instance fields</strong>, blank / not blank; filter these by <kbd>Ctrl</kbd>-clicking a chip in the grid instead.</li>
         </ul>
-        <p>Each action rewrites the query and re-runs it. Re-applying on the same column replaces its previous filter rather than stacking a second one.</p>
+        <p>Each action rewrites the query that ran and re-runs it; other queries in the editor aren't touched, and <kbd>Ctrl</kbd> + <kbd>Z</kbd> undoes the change. Re-applying on the same column replaces its previous filter rather than stacking a second one. (If you've edited the editor since running, the rewrite replaces the whole editor instead.)</p>
         <figure class="shot" data-src="guide/select-column-menu.png" data-cap="The column header menu, sort, contains, and blank filters."></figure>
         <figure class="shot" data-src="guide/select-column-menu0.png" data-cap="Applying a “contains” filter rewrites the WHERE clause and re-runs the query."></figure>
 
         <h3>Exporting &amp; saving</h3>
-        <p><strong>Export CSV</strong> streams the entire result set to a file. <strong>Save query</strong> / <strong>Load query</strong> keep a library of WQL you can reuse or share.</p>
+        <p><strong>Export CSV</strong> writes the entire result set to a file: choose where to save it, then watch the progress bar (you can cancel at any time; a cancelled export saves nothing). <strong>Save query</strong> / <strong>Load query</strong> keep a library of WQL you can reuse or share; a loaded file is added after the current query.</p>
       </section>
 
       <section id="insert">
         <h2>Insert</h2>
-        <div class="note"><strong>Custom BOs only.</strong> Insert / Update / Delete are enabled only for business objects that carry your <code>BO Company ID</code>. Set that on the connection, then switch to a write mode and the tree filters to just your custom BOs.</div>
+        <div class="note"><strong>Custom BOs only.</strong> Insert / Update / Delete are enabled only for business objects that carry your <code>BO Company ID</code>. Set that on the connection, then switch to a write mode and the tree filters to just your custom BOs. Clicking <strong>use</strong> on one starts a query that selects every field, <code>workdayID</code> first, so you see whole records.</div>
         <p>Switch to <strong>Insert</strong> mode, pick a custom BO, and run to see its current rows. Then create records one of three ways.</p>
         <figure class="shot" data-src="guide/insert-mode.png" data-cap="Insert mode on a custom BO, clone buttons on each row, plus New record and Bulk insert."></figure>
 
         <h3>New record</h3>
         <p>Click <strong>+ New record</strong> to open a form built from the BO’s writable fields. Fill what you need, empty fields are omitted so Workday applies its defaults and required-field rules. Read-only / derived fields that Workday rejects are dropped automatically and the insert retried.</p>
+        <div class="note"><strong>Typing numbers.</strong> Use a <code>.</code> for decimals and no thousands separators, for example <code>1234.5</code>. This is the same whatever language your browser uses. A value like <code>1,234</code> or <code>1,5</code> is sent as text, so Workday rejects it with an error instead of a different number being stored. The same applies in Update, Bulk insert and Bulk edit.</div>
         <figure class="shot" data-src="guide/insertSingleRow1.png" data-cap="The New record form, with fields typed from the BO schema."></figure>
         <figure class="shot" data-src="guide/insertSingleRow2.png" data-cap="The newly created record, returned by re-running the query."></figure>
 
@@ -510,7 +533,8 @@ FROM allWorkers</code></pre>
         <p><strong>⇪ Bulk insert</strong> lets you paste many rows at once, either tab/comma-delimited with a header row (a spreadsheet copy works), or a JSON array of objects. You’ll see a preview and a per-row result; rows are sent in chunks of 100.</p>
         <figure class="shot" data-src="guide/BulkInsert1.png" data-cap="Bulk insert, paste rows (here 120), preview, then insert in batches of 100."></figure>
         <figure class="shot" data-src="guide/BulkInsert2.png" data-cap="Bulk insert, the pasted rows are inserted"></figure>
-        <p>If Workday rejects some rows, the rest are still created. Each rejected row is listed with Workday's message, so you can fix just those rows and paste them again.</p>
+        <p>If Workday rejects some rows, the rest are still created. Each rejected row is listed with Workday's message, so you can fix just those rows and paste them again. You can paste up to 2,000 rows at a time; for more, use <a href="#export-import">Import rows</a>.</p>
+        <p>If your session expires part-way through, the rows already sent stay listed, and you're told how many weren't sent. <strong>Save unsent rows</strong> downloads just those as a JSON file; <strong>Reconnect</strong>, then load that file with <em>Import rows</em>. Pasting everything again would insert the earlier rows twice.</p>
       </section>
 
       <section id="update">
@@ -546,7 +570,7 @@ FROM allWorkers</code></pre>
         <p>When you click it, the app collects the ids of every matching row (<em>Collecting…</em>), then opens the <strong>Delete all rows</strong> confirmation. It has extra safeguards:</p>
         <ul>
           <li>A <strong>backup warning</strong> recommending you export the rows to <strong>JSON</strong> first, so they can be imported back.</li>
-          <li><strong>⤓ Go to Export (all fields)…</strong>, closes the dialog, switches to Export/Import mode, and loads your query with <em>every field</em> of the BO selected (same <code>FROM</code> / <code>WHERE</code>, so the same rows). See the <a href="#backup-restore">walkthrough</a>.</li>
+          <li><strong>⤓ Go to Export (all fields)…</strong>, closes the dialog, switches to Export/Import mode, and adds your query below the original with <em>every field</em> of the BO selected (same <code>FROM</code> / <code>WHERE</code>, so the same rows). See the <a href="#backup-restore">walkthrough</a>.</li>
           <li>A tick-box, <em>“I've exported a backup, or I don't need one.”</em>, which must be ticked before the Delete button enables.</li>
         </ul>
         <figure class="shot" data-src="guide/delete-all-confirm.png" data-cap="The Delete all confirmation, backup warning, Go to Export, and the acknowledgement tick-box."></figure>
@@ -554,6 +578,7 @@ FROM allWorkers</code></pre>
 
         <h3>Reading the results</h3>
         <p>Both kinds of delete are sent in batches of 100 and end with the same per-row list. A row that fails (for example, one already deleted by someone else) shows Workday's message; the rest of the batch is unaffected.</p>
+        <p>If your session expires part-way through, the batches already sent keep their results and the remaining rows are marked <em>not sent</em>; they were <strong>not deleted</strong>. Click <strong>Reconnect</strong>, then run the query again to see what's left.</p>
         <div class="tip"><strong>Back up first.</strong> Before a delete you can't undo, save the rows to JSON, Delete all's <em>Go to Export</em> button does the setup for you, or follow the <a href="#backup-restore">backup &amp; restore walkthrough</a>.</div>
       </section>
 
@@ -563,17 +588,18 @@ FROM allWorkers</code></pre>
         <div class="note"><strong>Custom BOs only</strong>, like the write modes. Switch to <strong>Export/Import</strong> and the tree filters to objects carrying your <code>BO Company ID</code>.</div>
 
         <h3>Exporting</h3>
-        <p>Pick a custom BO with <strong>use</strong>, the editor is filled with a <code>SELECT</code> of every field on that object, so nothing is left out of the backup. Run it, then choose <strong>⤓ Export all rows</strong>.</p>
+        <p>Pick a custom BO with <strong>use</strong>: a <code>SELECT</code> of every field on that object is added to the editor, so nothing is left out of the backup. Run it, then choose <strong>⤓ Export all rows</strong>.</p>
         <figure class="shot" data-src="guide/export-import-query.png" data-cap="In Export/Import mode, 'use' on a custom BO builds a SELECT of all its fields."></figure>
         <figure class="shot" data-src="guide/export-save.png" data-cap="Export all rows, the whole object (here 98 rows), not just the current page."></figure>
         <table class="field-table">
           <thead><tr><th>Format</th><th>Use it for</th></tr></thead>
           <tbody>
-            <tr><td><strong>JSON</strong></td><td>Backups you may restore. A JSON array of records with references kept as objects, this is the format <strong>Import rows</strong> reads.</td></tr>
+            <tr><td><strong>JSON</strong></td><td>Backups you may restore. A JSON array with one record per line and references kept as objects, this is the format <strong>Import rows</strong> reads.</td></tr>
             <tr><td><strong>CSV</strong></td><td>Reading in Excel. Flat, with references shown by descriptor, <em>not</em> re-importable.</td></tr>
           </tbody>
         </table>
-        <p>The export pages through <em>every row your query matches</em> regardless of the toolbar's Limit, shows a running count as it goes, and finishes with a <strong>Save As</strong> dialog so you choose the name and folder. Files are named <code>&lt;boName&gt;-&lt;timestamp&gt;.json</code> by default. If your query has a <code>WHERE</code>, only the matching rows are exported.</p>
+        <p>The export covers <em>every row your query matches</em>, regardless of the toolbar's Limit, and has <strong>no row limit</strong>. It first opens a <strong>Save As</strong> dialog so you choose the name and folder, then shows a <strong>progress bar</strong> while the rows are written to the file as they arrive. You can <strong>Cancel export</strong> at any point; a cancelled or failed export saves no file. Files are named <code>&lt;boName&gt;-&lt;timestamp&gt;.json</code> by default. If your query has a <code>WHERE</code>, only the matching rows are exported.</p>
+        <p>When the export finishes, the dialog confirms that the row count matches Workday's total and that every <code>workdayID</code> is unique &mdash; or warns you if the file is incomplete, so you know before relying on it as a backup.</p>
 
         <h3>Importing</h3>
         <p>Choose <strong>⤒ Import rows</strong> and pick a JSON file written by Export. Before anything is sent you'll see how many rows were found, a preview of the first few, and which fields are being left out. <strong>Import</strong> then creates them in batches of 100, reporting each row's outcome and new id.</p>
@@ -581,7 +607,7 @@ FROM allWorkers</code></pre>
         <p>Fields Workday manages are never sent, because they'd be rejected: <code>workdayID</code>, <code>createdMoment</code>, <code>lastFunctionallyUpdated</code>, <code>currentOMSVersion</code>, <code>classOfInstance1</code>, <code>referenceID1</code>, and the object's own <em>self-reference</em> field, a field named after the BO whose id is the row's own <code>workdayID</code>. References are reduced to their <code>id</code>, and values the schema says are numeric or boolean are converted back from the text WQL returns.</p>
 
         <div class="warn"><strong>Imported rows are new instances.</strong> Workday assigns a fresh <code>workdayID</code> on create, so an export → delete → import cycle restores the <em>data</em> but not the original ids, anything that referenced the old instances won't point at the new ones.</div>
-        <div class="note"><strong>Limits.</strong> Import reads up to 2000 rows per file. If Workday rejects a row, its message appears in the result list, which scrolls sideways for long errors.</div>
+        <div class="note"><strong>No row limit.</strong> Every row in the file is imported, 100 at a time, with a progress bar. For files of up to 500 rows each row's outcome is listed; for larger files only the rows that failed are listed (the first 500), each with Workday's message. <strong>Stop import</strong> ends the run after the current batch and lets you save the rows that weren't sent, so you can finish later without creating duplicates. If your session expires mid-import, you get the same <strong>Save unsent rows</strong> option, plus <strong>Reconnect</strong>.</div>
       </section>
 
       <section id="backup-restore">
@@ -596,11 +622,11 @@ WHERE applicantName contains 'TEST'</code></pre>
         <p>Run it and check the match count on <strong>Delete all N</strong>.</p>
 
         <h3>2. Export them to JSON</h3>
-        <p>Click <strong>Delete all N</strong>, then <strong>⤓ Go to Export (all fields)…</strong> in the confirmation. The app switches to Export/Import mode and loads the same query with every field of the BO selected. Run it, click <strong>⤓ Export all rows</strong>, keep <strong>JSON</strong>, and save the file.</p>
+        <p>Click <strong>Delete all N</strong>, then <strong>⤓ Go to Export (all fields)…</strong> in the confirmation. The app switches to Export/Import mode and adds the same query, with every field of the BO selected, below your original one, with the cursor in it. Run it, click <strong>⤓ Export all rows</strong>, keep <strong>JSON</strong>, and save the file.</p>
         <div class="note"><strong>Why all fields?</strong> An export only contains the columns your query selects. Going through <em>Go to Export</em> guarantees the backup holds every field, not just the two in the query above.</div>
 
         <h3>3. Delete</h3>
-        <p>Switch back to <strong>Delete</strong> mode, run the query again, click <strong>Delete all N</strong>, tick <em>“I've exported a backup”</em>, and click <strong>Delete all</strong>. Check the per-row results.</p>
+        <p>Switch back to <strong>Delete</strong> mode, put the cursor back in your original query and run it, click <strong>Delete all N</strong>, tick <em>“I've exported a backup”</em>, and click <strong>Delete all</strong>. Check the per-row results.</p>
 
         <h3>4. Restore (if needed)</h3>
         <p>In <strong>Export/Import</strong> mode, choose <strong>⤒ Import rows</strong> and pick the JSON file. Review the preview and skipped fields, then <strong>Import</strong>.</p>
@@ -610,7 +636,9 @@ WHERE applicantName contains 'TEST'</code></pre>
       <section id="shortcuts">
         <h2>Keyboard &amp; tips</h2>
         <ul>
+          <li class="kbd-row"><kbd>Ctrl</kbd> + <kbd>Enter</kbd>, run the query the cursor is in (or the selection)</li>
           <li class="kbd-row"><kbd>Ctrl</kbd> + <kbd>Space</kbd>, trigger autocomplete</li>
+          <li class="kbd-row"><kbd>Ctrl</kbd> + <kbd>Z</kbd>, undo a query the app added or rewrote (use, Load query, column sort / filter, drill-down)</li>
           <li class="kbd-row"><kbd>Ctrl</kbd> + <kbd>/</kbd>, toggle a line comment (editor-only; stripped before the query runs)</li>
         </ul>
         <div class="tip"><strong>Reference filters use <code>in (…)</code>.</strong> Drilling and instance filters build <code>WHERE field in (&lt;id&gt;)</code>; <code>=</code> is only used for boolean / date / numeric / text values.</div>
@@ -623,10 +651,11 @@ WHERE applicantName contains 'TEST'</code></pre>
           <thead><tr><th>What</th><th>Limit</th><th>Notes</th></tr></thead>
           <tbody>
             <tr><td>Rows per page in the grid</td><td>100</td><td>Toolbar Limit: 10 / 25 / 50 / 100. 100 is the API's maximum page size.</td></tr>
-            <tr><td>Fields loaded per source in the tree</td><td>2,000 at first</td><td>Use <em>load all</em> for the rest.</td></tr>
-            <tr><td>Export CSV (toolbar)</td><td>100,000 rows</td><td>Pages the whole result set.</td></tr>
+            <tr><td>Fields loaded per source in the tree</td><td>2,000 at first</td><td>Use <em>load all</em> for the rest. Autocomplete uses the same fields.</td></tr>
+            <tr><td>Bulk insert (pasted rows)</td><td>2,000 rows</td><td>For more, export to JSON and use <em>Import rows</em>.</td></tr>
+            <tr><td>Export (CSV or JSON)</td><td>No limit</td><td>Rows are written to the file as they arrive, with a progress bar.</td></tr>
             <tr><td>Bulk insert / Import batch</td><td>100 rows per call</td><td>Larger inputs are split into batches automatically.</td></tr>
-            <tr><td>Import file</td><td>2,000 rows</td><td>JSON exports only.</td></tr>
+            <tr><td>Import file</td><td>No row limit</td><td>JSON exports only. Sent 100 rows at a time.</td></tr>
             <tr><td>Bulk edit</td><td>1,000 rows</td><td>Sent in batches of 100.</td></tr>
             <tr><td>Delete (selected or all)</td><td>1,000 rows</td><td>Sent in batches of 100.</td></tr>
             <tr><td>Settings file import</td><td>5 MB</td><td>Connections JSON.</td></tr>
@@ -648,6 +677,12 @@ WHERE applicantName contains 'TEST'</code></pre>
             <tr><td>Bulk edit or Delete all shows <em>“… capped at 1,000. Add a narrower WHERE.”</em></td><td>Too many rows match. Split the job with a tighter <code>WHERE</code> and repeat.</td></tr>
             <tr><td>An insert quietly leaves some fields out</td><td>Workday rejected them as read-only or derived (error <code>A13</code>); the app dropped them and retried. Expected for fields like <code>createdMoment</code>.</td></tr>
             <tr><td>Some rows fail in a bulk result</td><td>Each failed row shows Workday's message; the others still went through. Fix and resend just the failed rows.</td></tr>
+            <tr><td><em>“Nothing to run here”</em></td><td>The cursor isn't in a query (only comments or blank lines around it). Click inside the query you want, or select it.</td></tr>
+            <tr><td>The wrong query runs</td><td>Check the <code>;</code> at the end of each query: without it, two queries count as one. The query that runs lights up briefly.</td></tr>
+            <tr><td>Session expired during an import, bulk insert or delete</td><td>The rows already sent keep their results. For import and bulk insert, <strong>Save unsent rows</strong>, reconnect and import that file; for delete, reconnect and run the query again to see what's left.</td></tr>
+            <tr><td>The export finishes with a warning</td><td>The row count didn't match Workday's total, or some rows came back twice (usually because rows were added or removed while it ran). Run the export again before relying on the file as a backup.</td></tr>
+            <tr><td>Loading is slow, or <code>net_http_request_timedout, 100</code></td><td>Workday took more than 100 seconds to answer one request, or each call is slow (several seconds per 100 rows). Narrow the query with a <code>WHERE</code>, or try again later.</td></tr>
+            <tr><td>An error like <em>“Could not find 'appInterop…'”</em></td><td>The browser is mixing an old copy of the app's files with a newer version. Press <kbd>Ctrl</kbd> + <kbd>F5</kbd>.</td></tr>
           </tbody>
         </table>
       </section>
@@ -713,7 +748,7 @@ ORDER BY Headcount DESC</code></pre>
         <pre><code>SELECT worker, location
 FROM allWorkers (effectiveAsOfDate = "2024-01-01")</code></pre>
 
-        <div class="note"><strong>Clause order is fixed:</strong> <code>PARAMETERS → SELECT → FROM → WHERE ON → WHERE → GROUP BY → HAVING → ORDER BY → LIMIT</code>. WQL sorts alphabetically, and without <code>ORDER BY</code> the row order isn't guaranteed.</p>
+        <div class="note"><strong>Clause order is fixed:</strong> <code>PARAMETERS → SELECT → FROM → WHERE ON → WHERE → GROUP BY → HAVING → ORDER BY → LIMIT</code>. WQL sorts alphabetically, and without <code>ORDER BY</code> the row order isn't guaranteed.</div>
       </section>
     </main>
   </div>

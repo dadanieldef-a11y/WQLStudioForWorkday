@@ -1641,3 +1641,62 @@ button.signout {
   font-size: 11.5px;
   margin: -2px 0 8px;
 }
+
+/* ── progress bar (Export dialog) ─────────────────────────────────────── */
+.progress {
+  height: 10px;
+  margin: 10px 0 6px;
+  border-radius: 6px;
+  background: var(--border-soft);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  border-radius: 6px;
+  background: var(--accent);
+  transition: width 0.25s ease;
+}
+/* Total not known yet: a sliding block instead of a fill level. */
+.progress-fill.indeterminate {
+  width: 40% !important;
+  animation: progress-slide 1.2s ease-in-out infinite;
+}
+@keyframes progress-slide {
+  0% { margin-left: -40%; }
+  100% { margin-left: 100%; }
+}
+
+/* ── loading popup (schema tree start-up / field loads) ───────────────── */
+.loading-overlay { z-index: 60; cursor: progress; }
+.loading-modal { width: 420px; }
+
+/* ── All / Custom / Delivered switch + custom badge (schema tree) ─────── */
+.tree-kind {
+  margin: 0 10px 8px;
+}
+.tree-kind .mode-switch {
+  display: flex;
+}
+.tree-kind .mode-btn {
+  flex: 1;
+  padding: 4px 6px;
+  font-size: 11.5px;
+}
+.ds-custom {
+  margin-left: 6px;
+  flex: none;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--violet);
+  border: 1px solid rgba(199, 155, 255, 0.35);
+  border-radius: 4px;
+  padding: 0 4px;
+  line-height: 14px;
+}
+
+/* ── run-statement flash (editor) ─────────────────────────────────────── */
+.wql-run-flash {
+  background: rgba(74, 168, 255, 0.22);
+  border-radius: 2px;
+}

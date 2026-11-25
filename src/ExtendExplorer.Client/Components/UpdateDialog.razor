@@ -276,7 +276,7 @@
     private static object? CoerceScalar(string scalarType, string value)
     {
         if (scalarType == "number")
-            return double.TryParse(value, out var n) ? n : value;
+            return Scalars.TryParseNumber(value, out var n) ? n : value;
         if (scalarType == "boolean")
             return value == "true" || value == "1";
         return value;

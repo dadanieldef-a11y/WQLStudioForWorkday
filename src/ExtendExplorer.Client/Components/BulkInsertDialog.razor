@@ -1,6 +1,7 @@
 @namespace ExtendExplorer.Client.Components
 @inject ApiClient Api
 @inject BoFields BoFieldsSvc
+@inject Interop Interop
 @using System.Net
 @using System.Text.Json.Nodes
 @using System.Text.RegularExpressions
@@ -119,6 +120,15 @@
             @if (_phase == "done")
             {
                 <p class="del-summary">@OkCount inserted@(FailCount > 0 ? $", {FailCount} failed" : "").</p>
+                @if (_sessionExpired)
+                {
+                    <div class="connect-error">
+                        Your Workday session expired part-way through.
+                        <strong>@UnsentCount row@(UnsentCount == 1 ? "" : "s") (from row @(_unsentFrom + 1) onward) were not sent.</strong>
+                        The rows listed below were already sent, so pasting everything again would insert them twice.
+                        Save the unsent rows, reconnect, then load that file with <em>Import rows</em> (Export/Import mode).
+                    </div>
+                }
                 @if (_droppedAll.Count > 0)
                 {
                     <p class="del-warn">Read-only fields dropped: @string.Join(", ", _droppedAll).</p>
@@ -134,6 +144,11 @@
                 <button class="btn btn-primary del-go" @onclick="Insert" disabled="@(!CanInsert)">
                     @(_phase == "running" ? "Inserting…" : $"Insert {(_parsed.Records.Count > 0 ? _parsed.Records.Count.ToString() : "")} row{(_parsed.Records.Count == 1 ? "" : "s")}")
                 </button>
+            }
+            else if (_phase == "done" && _sessionExpired)
+            {
+                <button class="btn" @onclick="SaveUnsent">⤓ Save unsent rows</button>
+                <button class="btn btn-primary" @onclick="@(() => Api.RedirectToLogin())">Reconnect</button>
             }
             else if (_phase == "done")
             {
@@ -186,6 +201,14 @@
     private Parsed _parsed = new();
     private List<string> _droppedAll = new();
 
+    // Set when a chunk comes back 401 after earlier chunks already went through:
+    // the run stops, the results so far stay on screen, and the rows from
+    // _unsentFrom on can be saved for a later import (instead of the whole
+    // paste being re-run, which would duplicate the rows already inserted).
+    private bool _sessionExpired;
+    private int _unsentFrom = -1;
+    private int UnsentCount => _unsentFrom < 0 ? 0 : Math.Max(0, _parsed.Records.Count - _unsentFrom);
+
     private bool _busy => _phase == "running";
     private bool _tooMany => _parsed.Records.Count > MaxRows;
     private bool CanInsert => _phase == "edit" && _parsed.Records.Count > 0 && _parsed.Error is null && !_tooMany;
@@ -215,6 +238,8 @@
         _error = null;
         _results.Clear();
         _progress = 0;
+        _sessionExpired = false;
+        _unsentFrom = -1;
 
         // Insert in chunks from the browser so no single request can exceed the
         // host's response timeout; merge each chunk's per-row results as they
@@ -226,7 +251,16 @@
             {
                 var (status, body) = await Api.PostRawAsync("/api/workday/insert-bulk",
                     new { boName = BoName, records = chunk });
-                if (status == (int)HttpStatusCode.Unauthorized) { Api.RedirectToLogin(); return; }
+                if (status == (int)HttpStatusCode.Unauthorized)
+                {
+                    // Nothing sent yet — just go back to the Connect screen.
+                    if (start == 0) { Api.RedirectToLogin(); return; }
+                    // Session expired mid-run. A 401 means this chunk was rejected,
+                    // so everything from `start` on is unsent; keep what we have.
+                    _sessionExpired = true;
+                    _unsentFrom = start;
+                    break;
+                }
                 if (status < 200 || status >= 300)
                 {
                     var msg = status is 504 or 502
@@ -261,6 +295,17 @@
 
         _droppedAll = _results.SelectMany(r => r.Dropped ?? new()).Distinct().ToList();
         _phase = "done";
+    }
+
+    // Download the rows that were never sent (after a mid-run session expiry)
+    // as a JSON array that Import rows can load.
+    private async Task SaveUnsent()
+    {
+        if (_unsentFrom < 0) return;
+        var rest = _parsed.Records.Skip(_unsentFrom).ToList();
+        var json = JsonSerializer.Serialize(rest, new JsonSerializerOptions { WriteIndented = true });
+        var stamp = DateTime.Now.ToString("yyyy-MM-dd-HHmm");
+        await Interop.DownloadJsonAsync($"{BoName}-unsent-{stamp}.json", json);
     }
 
     private async Task Finish()
@@ -373,7 +418,7 @@
     private static object? CoerceCell(string v, BoFieldDto? m)
     {
         if (m?.Kind == "reference") return new { id = v.Trim() };
-        if (m?.Type == "number") return double.TryParse(v, out var n) ? n : v;
+        if (m?.Type == "number") return Scalars.TryParseNumber(v, out var n) ? n : v;
         if (m?.Type == "boolean") return Regex.IsMatch(v.Trim(), "^(true|1|yes)$", RegexOptions.IgnoreCase);
         return v;
     }

@@ -17,7 +17,8 @@
         }
     </div>
 
-    <button class="btn btn-primary" @onclick="OnRun" disabled="@Running">
+    <button class="btn btn-primary" @onclick="OnRun" disabled="@Running"
+            title="Run the query the cursor is in (Ctrl+Enter). Queries end with ;. Select text to run just that.">
         @(Running ? "Running…" : "Run")
         <span style="margin-left:8px">🟢</span>
     </button>

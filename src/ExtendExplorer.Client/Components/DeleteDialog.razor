@@ -71,6 +71,13 @@
                 <p class="del-summary">
                     @_okCount deleted@(_failCount > 0 ? $", {_failCount} failed" : "").
                 </p>
+                @if (_sessionExpired)
+                {
+                    <div class="connect-error">
+                        Your Workday session expired part-way through. The rows marked “not sent” below were
+                        <strong>not deleted</strong>. Reconnect and run the query again to see what’s left.
+                    </div>
+                }
                 @if (_target is not null)
                 {
                     <div class="del-target" title="@_target">DELETE @_target</div>
@@ -101,6 +108,10 @@
             {
                 <button class="btn" disabled>Deleting…</button>
             }
+            else if (_phase == "done" && _sessionExpired)
+            {
+                <button class="btn btn-primary" @onclick="@(() => Api.RedirectToLogin())">Reconnect</button>
+            }
             else if (_phase == "done")
             {
                 <button class="btn btn-primary" @onclick="Finish">Done</button>
@@ -128,6 +139,9 @@
     private string? _error;
     private int _okCount;
     private int _failCount;
+    // The server reports this when the session died after some batches had
+    // already been deleted; the results then cover every id, sent or not.
+    private bool _sessionExpired;
 
     private async Task Run()
     {
@@ -148,6 +162,7 @@
             var data = Deserialize<DeleteResponse>(body);
             _results = data?.Results ?? new();
             _target = data?.Target;
+            _sessionExpired = data?.SessionExpired ?? false;
             _okCount = _results.Count(r => r.Ok);
             _failCount = _results.Count - _okCount;
             _phase = "done";

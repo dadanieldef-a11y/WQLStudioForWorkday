@@ -81,6 +81,72 @@ window.appInterop = {
     this.downloadText(suggestedName, text, mime || "text/plain;charset=utf-8");
     return true;
   },
+  // ── Streaming file export ───────────────────────────────────────────────
+  // An export of any size is written a chunk at a time instead of being built
+  // as one giant string. exportOpen asks where to save (File System Access
+  // API) and returns a handle id, or null if the user cancelled. Where that
+  // API isn't available (Firefox/Safari) or refuses, the chunks are kept as
+  // Blob parts and downloaded as one file on exportClose.
+  // With the Save dialog, nothing is committed to disk until exportClose, so
+  // an aborted export leaves no partial file behind.
+  _exports: Object.create(null),
+  _exportSeq: 0,
+  exportOpen: async function (suggestedName, description, mime, extension) {
+    const self = window.appInterop;
+    const id = "export-" + ++self._exportSeq;
+    if (window.showSaveFilePicker) {
+      try {
+        const accept = {};
+        accept[mime] = [extension];
+        const handle = await window.showSaveFilePicker({
+          suggestedName: suggestedName,
+          types: [{ description: description, accept: accept }],
+        });
+        const writable = await handle.createWritable();
+        self._exports[id] = { kind: "file", writable: writable };
+        return id;
+      } catch (e) {
+        if (e && e.name === "AbortError") return null; // user cancelled
+        // any other error (no user gesture, permission…) falls back to a download
+      }
+    }
+    self._exports[id] = { kind: "blob", parts: [], name: suggestedName, mime: mime };
+    return id;
+  },
+  exportWrite: async function (id, text) {
+    const x = window.appInterop._exports[id];
+    if (!x) throw new Error("Export file is not open.");
+    if (x.kind === "file") await x.writable.write(text);
+    else x.parts.push(new Blob([text]));
+  },
+  exportClose: async function (id) {
+    const self = window.appInterop;
+    const x = self._exports[id];
+    if (!x) return;
+    delete self._exports[id];
+    if (x.kind === "file") {
+      await x.writable.close();
+      return;
+    }
+    const blob = new Blob(x.parts, { type: x.mime || "application/octet-stream" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = x.name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+  },
+  exportAbort: async function (id) {
+    const self = window.appInterop;
+    const x = self._exports[id];
+    if (!x) return;
+    delete self._exports[id];
+    if (x.kind === "file") {
+      try { await x.writable.abort(); } catch { /* already closed */ }
+    }
+  },
   // Trigger a client-side download of a CSV string. Prefix a BOM so Excel opens
   // UTF-8 correctly — matches downloadCsv() in the original lib/wql-format.ts.
   downloadCsv: function (filename, csv) {

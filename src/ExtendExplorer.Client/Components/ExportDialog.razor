@@ -1,17 +1,22 @@
 @namespace ExtendExplorer.Client.Components
+@implements IDisposable
 @inject WqlMetadata Meta
 @inject Interop Interop
+@using System.Text
 
-@* Export every row of one custom BO to a file — a backup you can take before a
-   delete, and (in JSON form) feed straight back through Bulk insert. Pages the
-   query rather than relying on the current page, so the whole object comes out
-   regardless of the toolbar's Limit. *@
+@* Export every row a query returns to a file — a backup you can take before a
+   delete, and (in JSON form) feed straight back through Import rows / Bulk
+   insert. Also what the toolbar's "Export CSV" opens (Format="csv", AutoStart).
+
+   There is no row limit: the save location is chosen first, then each page is
+   written to the file as it arrives, so the result set never has to fit in
+   memory. While it runs the dialog shows a progress bar and can be cancelled. *@
 
 <div class="modal-overlay">
     <div class="modal modal-wide" @onclick:stopPropagation="true">
         <div class="modal-head">
             <div>
-                <div class="modal-title">@(_phase == "done" ? "Export complete" : "Export all rows")</div>
+                <div class="modal-title">@(_phase == "done" ? "Export complete" : _phase == "running" ? "Exporting…" : "Export all rows")</div>
                 <div class="modal-sub">@BoName</div>
             </div>
             @if (_phase != "running")
@@ -28,16 +33,13 @@
 
             @if (_phase == "edit")
             {
-                <p class="del-warn">
-                    Exports every row this query returns@(Total is long t ? $" — {t:N0} row{(t == 1 ? "" : "s")}" : "")
-                    , not just the current page.
-                </p>
+                <p class="del-warn">@EditSummary</p>
 
                 <div class="rec-field">
                     <label class="rec-key">Format</label>
                     <select class="rec-input" value="@_format"
                             @onchange="@(e => _format = e.Value?.ToString() ?? "json")">
-                        <option value="json">JSON — re-importable via Bulk insert</option>
+                        <option value="json">JSON — re-importable via Import rows / Bulk insert</option>
                         <option value="csv">CSV — for reading in Excel</option>
                     </select>
                 </div>
@@ -45,10 +47,10 @@
                 @if (_format == "json")
                 {
                     <div class="note-inline">
-                        A JSON array of records, with references kept as objects. This is the
-                        format <strong>Bulk insert</strong> accepts, so you can restore rows from it later.
-                        System fields (<code>workdayID</code>, created/updated moments) are included for
-                        reference and skipped on re-import.
+                        A JSON array with one record per line, references kept as objects. This is the
+                        format <strong>Import rows</strong> and <strong>Bulk insert</strong> accept, so you can
+                        restore rows from it later. System fields (<code>workdayID</code>, created/updated
+                        moments) are included for reference and skipped on re-import.
                     </div>
                 }
                 else
@@ -64,14 +66,32 @@
 
             @if (_phase == "running")
             {
-                <p class="del-warn">Fetching rows… @_fetched.ToString("N0") so far.</p>
+                <p class="del-warn">@ProgressText</p>
+                <div class="progress" role="progressbar" aria-label="Export progress"
+                     aria-valuemin="0" aria-valuemax="100" aria-valuenow="@(Percent ?? 0)">
+                    <div class="progress-fill@(Percent is null ? " indeterminate" : "")" style="width:@(Percent ?? 100)%"></div>
+                </div>
+                <p class="bulk-hint">
+                    Rows are written to the file as they arrive. Keep this tab open until it finishes.
+                </p>
             }
 
             @if (_phase == "done")
             {
-                <p class="del-summary">
-                    @_fetched.ToString("N0") row@(_fetched == 1 ? "" : "s") exported@(_saved ? "." : " — save cancelled.")
-                </p>
+                <p class="del-summary">@_fetched.ToString("N0") row@(_fetched == 1 ? "" : "s") exported.</p>
+                @if (_warnings.Count > 0)
+                {
+                    <div class="connect-error">
+                        @foreach (var w in _warnings)
+                        {
+                            <div @key="w" style="margin:2px 0">@w</div>
+                        }
+                    </div>
+                }
+                else if (_verified is not null)
+                {
+                    <div class="note-inline">@_verified</div>
+                }
             }
         </div>
 
@@ -83,7 +103,9 @@
             }
             else if (_phase == "running")
             {
-                <button class="btn" disabled>Exporting…</button>
+                <button class="btn" @onclick="CancelExport" disabled="@_cancelling">
+                    @(_cancelling ? "Cancelling…" : "Cancel export")
+                </button>
             }
             else
             {
@@ -98,59 +120,228 @@
     [Parameter] public string Wql { get; set; } = "";
     [Parameter] public long? Total { get; set; }
     [Parameter] public EventCallback OnClose { get; set; }
-
-    private const int MaxRows = 100_000;
+    // Format the dialog opens on: "json" (default) or "csv".
+    [Parameter] public string Format { get; set; } = "json";
+    // Start exporting as soon as the dialog opens (the toolbar's Export CSV).
+    [Parameter] public bool AutoStart { get; set; }
 
     private string _phase = "edit"; // edit | running | done
     private string _format = "json";
     private string? _error;
     private int _fetched;
-    private bool _saved;
+    private long? _liveTotal;       // Workday's total, once the first page reports it
+    private bool _cancelling;
+    private CancellationTokenSource? _cts;
+
+    // Completeness checks on the finished export: problems to show, or (when
+    // everything could be checked and passed) a one-line confirmation.
+    private readonly List<string> _warnings = new();
+    private string? _verified;
+
+    private string EditSummary
+    {
+        get
+        {
+            var n = Total.HasValue ? $" — {Total.Value:N0} row{(Total.Value == 1 ? "" : "s")}" : "";
+            return $"Exports every row this query returns{n}, not just the current page. There is no row limit.";
+        }
+    }
 
     private string Preview =>
         _format == "json"
-            ? "[\n  { \"workdayID\": \"…\", \"field\": \"value\", \"reference\": { \"id\": \"…\" } },\n  …\n]"
+            ? "[\n{ \"workdayID\": \"…\", \"field\": \"value\", \"reference\": { \"id\": \"…\" } },\n…\n]"
             : "workdayID,field,reference\n…";
 
-    private async Task Run()
+    // 0–100 when Workday has told us the total; null (indeterminate bar) otherwise.
+    private int? Percent =>
+        _liveTotal.HasValue && _liveTotal.Value > 0
+            ? (int)Math.Min(100, _fetched * 100L / _liveTotal.Value)
+            : null;
+
+    private string ProgressText
     {
-        _phase = "running";
+        get
+        {
+            if (_cancelling) return "Cancelling…";
+            var of = _liveTotal.HasValue ? $" of {_liveTotal.Value:N0}" : "";
+            var pct = Percent.HasValue ? $" ({Percent.Value}%)" : "";
+            return $"{_fetched:N0}{of} rows{pct}";
+        }
+    }
+
+    protected override void OnInitialized() => _format = Format == "csv" ? "csv" : "json";
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && AutoStart) await RunCore(closeIfSaveCancelled: true);
+    }
+
+    private Task Run() => RunCore(closeIfSaveCancelled: false);
+
+    private async Task RunCore(bool closeIfSaveCancelled)
+    {
+        if (_phase == "running") return;
         _error = null;
         _fetched = 0;
+        _liveTotal = Total;
+        _cancelling = false;
+        _warnings.Clear();
+        _verified = null;
+
+        var json = _format == "json";
+        var stamp = DateTime.Now.ToString("yyyy-MM-dd-HHmm");
+        var name = $"{BoName}-{stamp}.{(json ? "json" : "csv")}";
+
+        // Ask where to save FIRST — while the click still counts as a user
+        // gesture for the browser's Save dialog — then stream into that file.
+        string? file;
         try
         {
-            // Pages the whole object (100 rows per request — the gateway cap —
-            // 5 requests in flight) rather than relying on the toolbar's Limit.
-            var (columns, rows) = await Meta.FetchAllRowsAsync(Wql, MaxRows, n =>
-            {
-                _fetched = n;
-                InvokeAsync(StateHasChanged);
-            });
-            _fetched = rows.Count;
-
-            var stamp = DateTime.Now.ToString("yyyy-MM-dd-HHmm");
-            string content;
-            string name;
-            if (_format == "json")
-            {
-                content = System.Text.Json.JsonSerializer.Serialize(rows,
-                    new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
-                name = $"{BoName}-{stamp}.json";
-            }
-            else
-            {
-                content = WqlFormat.ToCsv(columns, rows);
-                name = $"{BoName}-{stamp}.csv";
-            }
-
-            _saved = await Interop.SaveTextAsAsync(name, content);
-            _phase = "done";
+            file = await Interop.ExportOpenAsync(
+                name,
+                json ? "JSON file" : "CSV file",
+                json ? "application/json" : "text/csv",
+                json ? ".json" : ".csv");
         }
-        catch (RedirectingToLoginException) { /* navigating away */ }
         catch (Exception e)
         {
-            _error = e.Message;
+            _error = $"Couldn't open a file to save to: {e.Message}";
+            StateHasChanged();
+            return;
+        }
+        if (file is null)
+        {
+            // The user cancelled the Save dialog.
+            if (closeIfSaveCancelled) await OnClose.InvokeAsync();
+            return;
+        }
+
+        _phase = "running";
+        _cts = new CancellationTokenSource();
+        StateHasChanged();
+
+        try
+        {
+            List<string>? header = null;      // CSV columns, fixed by the first page
+            var lateColumns = new List<string>();
+            var firstRow = true;
+
+            var res = await Meta.StreamAllRowsAsync(Wql, async page =>
+            {
+                var sb = new StringBuilder();
+                if (json)
+                {
+                    // One record per line inside a single JSON array.
+                    foreach (var row in page.Rows)
+                    {
+                        sb.Append(firstRow ? "[\n" : ",\n");
+                        firstRow = false;
+                        sb.Append(JsonSerializer.Serialize(row));
+                    }
+                }
+                else
+                {
+                    if (header is null)
+                    {
+                        header = page.Columns.ToList();
+                        sb.Append('\uFEFF'); // BOM so Excel reads UTF-8 correctly
+                        sb.Append(WqlFormat.CsvHeaderLine(header));
+                    }
+                    else
+                    {
+                        foreach (var c in page.Columns)
+                            if (!header.Contains(c) && !lateColumns.Contains(c)) lateColumns.Add(c);
+                    }
+                    foreach (var row in page.Rows)
+                    {
+                        sb.Append("\r\n");
+                        sb.Append(WqlFormat.CsvLine(header, row));
+                    }
+                }
+                if (sb.Length > 0) await Interop.ExportWriteAsync(file, sb.ToString());
+            },
+            (n, total) =>
+            {
+                _fetched = n;
+                if (total.HasValue) _liveTotal = total;
+                InvokeAsync(StateHasChanged);
+            },
+            _cts.Token);
+
+            if (json) await Interop.ExportWriteAsync(file, firstRow ? "[]" : "\n]");
+            await Interop.ExportCloseAsync(file);
+
+            _fetched = res.Count;
+            CheckCompleteness(res, lateColumns);
+            _phase = "done";
+        }
+        catch (RedirectingToLoginException)
+        {
+            await Interop.ExportAbortAsync(file); // navigating away
+        }
+        catch (OperationCanceledException)
+        {
+            await Interop.ExportAbortAsync(file);
+            _error = "Export cancelled — no file was saved.";
             _phase = "edit";
         }
+        catch (Exception e)
+        {
+            await Interop.ExportAbortAsync(file);
+            _error = $"Export failed — no file was saved. {e.Message}";
+            _phase = "edit";
+        }
+        finally
+        {
+            _cts?.Dispose();
+            _cts = null;
+            _cancelling = false;
+            StateHasChanged();
+        }
+    }
+
+    private void CancelExport()
+    {
+        if (_cts is null || _cancelling) return;
+        _cancelling = true;
+        _cts.Cancel(); // takes effect before the next batch of pages is requested
+    }
+
+    // This file may be the only copy of the rows before a delete, so say
+    // plainly when it can't be trusted as a complete one.
+    private void CheckCompleteness(StreamRowsResult res, List<string> lateColumns)
+    {
+        var count = res.Count;
+
+        if (res.DuplicateIds > 0)
+        {
+            _warnings.Add($"{res.DuplicateIds:N0} row{(res.DuplicateIds == 1 ? "" : "s")} came back more than once (same workdayID), "
+                + "which usually means other rows are missing. Run the export again before relying on this file.");
+        }
+        if (res.CountMismatch)
+        {
+            _warnings.Add($"Workday reported {res.Total!.Value:N0} rows but {count:N0} were fetched — rows may have been added or removed "
+                + "while the export ran. Run it again before relying on this file.");
+        }
+        // Without workdayID the duplicate check can't run, so say so on multi-page exports.
+        if (!res.IdsChecked && count > 100)
+        {
+            _warnings.Add("This query doesn't return workdayID, so the rows couldn't be checked for duplicates. For a backup, add workdayID to the SELECT.");
+        }
+        if (lateColumns.Count > 0)
+        {
+            _warnings.Add($"{lateColumns.Count} column{(lateColumns.Count == 1 ? "" : "s")} first appeared after the CSV header was written and "
+                + $"{(lateColumns.Count == 1 ? "was" : "were")} left out: {string.Join(", ", lateColumns.Take(10))}{(lateColumns.Count > 10 ? "…" : "")}. "
+                + "Name them in the SELECT, or export as JSON.");
+        }
+
+        if (_warnings.Count == 0 && res.IdsChecked && res.Total.HasValue)
+            _verified = $"Checked: {count:N0} row{(count == 1 ? "" : "s")}, matching Workday's total, each with a unique workdayID.";
+    }
+
+    public void Dispose()
+    {
+        // Dialog removed mid-export (e.g. sign-out): stop paging.
+        try { _cts?.Cancel(); } catch { /* already disposed */ }
     }
 }

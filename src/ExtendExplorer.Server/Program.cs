@@ -70,26 +70,20 @@ if (app.Environment.IsDevelopment())
 
 // Serve the Blazor WebAssembly client's framework files + static assets.
 app.UseBlazorFrameworkFiles();
-if (app.Environment.IsDevelopment())
+// Our own static assets (js/css/html and the guide) aren't renamed per build the
+// way Blazor's framework files are, so a browser that cached an older copy
+// would mix it with a newer app and fail (e.g. "Could not find
+// 'appInterop.exportOpen'"). Ask the browser to revalidate them on every load,
+// in the published exe as well as in development. The cost is one cheap
+// "not modified" check per file on a local server. Files under _framework/
+// (served above) keep their own long-lived, content-hashed caching.
+app.UseStaticFiles(new Microsoft.AspNetCore.Builder.StaticFileOptions
 {
-    // In dev, tell the browser to revalidate our static assets (js/css) every
-    // load, so edits to interop.js / monaco-wql.js / app.css show up on a normal
-    // reload instead of being served from a stale cache.
-    app.UseStaticFiles(new Microsoft.AspNetCore.Builder.StaticFileOptions
+    OnPrepareResponse = ctx =>
     {
-        OnPrepareResponse = ctx =>
-        {
-            ctx.Context.Response.Headers["Cache-Control"] =
-                "no-cache, no-store, must-revalidate";
-            ctx.Context.Response.Headers["Pragma"] = "no-cache";
-            ctx.Context.Response.Headers["Expires"] = "0";
-        },
-    });
-}
-else
-{
-    app.UseStaticFiles();
-}
+        ctx.Context.Response.Headers["Cache-Control"] = "no-cache";
+    },
+});
 
 app.UseRouting();
 app.UseSession();

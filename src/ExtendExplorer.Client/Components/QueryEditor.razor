@@ -99,6 +99,56 @@ else
         catch { return Value; }
     }
 
+    // What Run should execute: the selection, or the statement (ended by ";")
+    // around the cursor. The plain-textarea fallback runs the whole text.
+    public async Task<EditorRunText> GetRunTextAsync()
+    {
+        if (!_useFallback)
+        {
+            try
+            {
+                var r = await Interop.EditorGetRunTextAsync(ElementId);
+                if (r is not null) return r;
+            }
+            catch { /* fall through to the whole text */ }
+        }
+        var v = Value ?? "";
+        return new EditorRunText { Text = v, CodeStart = 0, CodeEnd = v.Length };
+    }
+
+    // Add text as a new statement after the current one (fills an empty editor).
+    // The textarea fallback appends it at the end.
+    public async Task InsertStatementAsync(string text, int cursor = 0)
+    {
+        if (_useFallback)
+        {
+            var add = text.TrimEnd();
+            if (!add.EndsWith(';')) add += ";";
+            var v = (Value ?? "").TrimEnd();
+            Value = string.IsNullOrWhiteSpace(v) ? add : $"{v}{(v.EndsWith(';') ? "" : ";")}\n\n{add}";
+            await ValueChanged.InvokeAsync(Value);
+            StateHasChanged();
+            return;
+        }
+        await Interop.EditorInsertStatementAsync(ElementId, text, cursor);
+    }
+
+    // Replace part of the text (one undoable edit in Monaco).
+    public async Task ReplaceRangeAsync(int start, int end, string text)
+    {
+        if (_useFallback)
+        {
+            var v = Value ?? "";
+            start = Math.Clamp(start, 0, v.Length);
+            end = Math.Clamp(end, start, v.Length);
+            Value = v[..start] + text + v[end..];
+            await ValueChanged.InvokeAsync(Value);
+            StateHasChanged();
+            return;
+        }
+        await Interop.EditorReplaceRangeAsync(ElementId, start, end, text);
+    }
+
     public async Task SetPositionAsync(int line, int column)
     {
         if (_useFallback) return;

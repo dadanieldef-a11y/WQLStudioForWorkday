@@ -55,6 +55,27 @@ public sealed class Interop
     public ValueTask<bool> SaveTextAsAsync(string suggestedName, string text) =>
         _js.InvokeAsync<bool>("appInterop.saveTextAs", suggestedName, text, "text/plain;charset=utf-8");
 
+    // ── Streaming file export (wwwroot/js/interop.js: exportOpen/Write/Close) ──
+    // Open a file to stream an export into. Shows the browser's Save dialog
+    // where supported (otherwise the parts are collected and downloaded on
+    // close). Returns a handle id, or null if the user cancelled the dialog.
+    public ValueTask<string?> ExportOpenAsync(string suggestedName, string description, string mime, string extension) =>
+        _js.InvokeAsync<string?>("appInterop.exportOpen", suggestedName, description, mime, extension);
+
+    public ValueTask ExportWriteAsync(string id, string text) =>
+        _js.InvokeVoidAsync("appInterop.exportWrite", id, text);
+
+    // Finish the file (this is what actually commits it to disk).
+    public ValueTask ExportCloseAsync(string id) =>
+        _js.InvokeVoidAsync("appInterop.exportClose", id);
+
+    // Discard an unfinished export; nothing is saved.
+    public async ValueTask ExportAbortAsync(string id)
+    {
+        try { await _js.InvokeVoidAsync("appInterop.exportAbort", id); }
+        catch { /* best effort */ }
+    }
+
     public ValueTask FocusByIdAsync(string id) =>
         _js.InvokeVoidAsync("appInterop.focusById", id);
 
@@ -74,6 +95,20 @@ public sealed class Interop
 
     public ValueTask<string> EditorGetValueAsync(string elementId) =>
         _js.InvokeAsync<string>("wqlEditor.getValue", elementId);
+
+    // What Run should execute (selection, or the statement around the cursor),
+    // with the offsets of the query text inside it. null if no editor.
+    public ValueTask<EditorRunText?> EditorGetRunTextAsync(string elementId) =>
+        _js.InvokeAsync<EditorRunText?>("wqlEditor.getRunText", elementId);
+
+    // Add text as a new statement after the one the cursor is in (or fill an
+    // empty editor), placing the cursor `cursor` characters into it.
+    public ValueTask<int> EditorInsertStatementAsync(string elementId, string value, int cursor) =>
+        _js.InvokeAsync<int>("wqlEditor.insertStatement", elementId, value, cursor);
+
+    // Replace the text between two offsets as one undoable edit.
+    public ValueTask EditorReplaceRangeAsync(string elementId, int start, int end, string value) =>
+        _js.InvokeVoidAsync("wqlEditor.replaceRange", elementId, start, end, value);
 
     public ValueTask EditorSetValueAsync(string elementId, string value) =>
         _js.InvokeVoidAsync("wqlEditor.setValue", elementId, value);
@@ -104,4 +139,14 @@ public sealed class Interop
         try { await _js.InvokeVoidAsync("wqlEditor.setFields", dataSourceId, fields); }
         catch { /* editor JS not ready */ }
     }
+}
+
+// What the editor says Run should execute. Text is the full statement (with any
+// header comment and the ending ";"); CodeStart/CodeEnd are the offsets of just
+// the query, which is what a column sort or drill-down rewrites in place.
+public sealed class EditorRunText
+{
+    public string Text { get; set; } = "";
+    public int CodeStart { get; set; }
+    public int CodeEnd { get; set; }
 }

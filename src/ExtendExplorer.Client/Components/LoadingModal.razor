@@ -1,0 +1,44 @@
+@namespace ExtendExplorer.Client.Components
+
+@* A blocking "please wait" popup with a progress bar. Covers the whole page so
+   nothing else can be clicked while metadata loads (the schema tree's business
+   objects on start-up, and a source's fields when it's expanded).
+   Percent is shown when the total is known; otherwise the bar animates. *@
+
+<div class="modal-overlay loading-overlay" role="alertdialog" aria-modal="true" aria-label="@Title">
+    <div class="modal loading-modal">
+        <div class="modal-head">
+            <div>
+                <div class="modal-title">@Title</div>
+                @if (!string.IsNullOrEmpty(Subtitle))
+                {
+                    <div class="modal-sub">@Subtitle</div>
+                }
+            </div>
+        </div>
+        <div class="modal-body rec-body">
+            <p class="del-warn">@ProgressText</p>
+            <div class="progress" role="progressbar" aria-label="@Title"
+                 aria-valuemin="0" aria-valuemax="100" aria-valuenow="@(Percent ?? 0)">
+                <div class="progress-fill@(Percent is null ? " indeterminate" : "")" style="width:@(Percent ?? 100)%"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string Title { get; set; } = "Loading…";
+    [Parameter] public string? Subtitle { get; set; }
+    // What's being counted, e.g. "business objects" or "fields".
+    [Parameter] public string Noun { get; set; } = "items";
+    [Parameter] public int Loaded { get; set; }
+    [Parameter] public int? Total { get; set; }
+
+    private int? Percent =>
+        Total is int t && t > 0 ? (int)Math.Min(100, Loaded * 100L / t) : null;
+
+    private string ProgressText =>
+        Total is int t && t > 0
+            ? $"{Loaded:N0} of {t:N0} {Noun} ({Percent}%)"
+            : Loaded > 0 ? $"{Loaded:N0} {Noun} so far…" : "Connecting to Workday…";
+}
